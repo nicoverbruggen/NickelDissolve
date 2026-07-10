@@ -49,7 +49,8 @@ offset — no per-struct code. Screen dimensions are read from the update itself
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); back turns flip automatically |
 | `nds_wait` | `submission` | between strips wait for `submission` (fast) or `complete` (slower, more discrete) |
 | `nds_delay_us` | 0 | extra pause between strips, µs (0–50000) — the animation-speed dial |
-| `nds_log_ioctl` | 1 | log the hwtcon ioctl stream / sweep events |
+| `nds_cfa_skip` | 1 | **Kaleido colour panels:** skip the per-region CFA colour pass on the strips (removes the boundary seams). Correct for B&W; no-op on mono/i.MX |
+| `nds_log_ioctl` | 1 | log the ioctl stream / sweep events |
 
 Changes take effect on reboot (config is read once at startup). Tuning guide: leave
 `nds_strip_waveform:0` (keep) for best quality on any device; use `nds_strips`/`nds_delay_us`

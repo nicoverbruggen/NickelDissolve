@@ -45,6 +45,7 @@ static const char *const NDS_LIBNICKEL = "/usr/local/Kobo/libnickel.so.1.0.0";
 enum { OFF_TOP = 0, OFF_LEFT = 4, OFF_WIDTH = 8, OFF_HEIGHT = 12,
        OFF_WAVEFORM = 16, OFF_UPDMODE = 20, OFF_MARKER = 24 };
 enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
+#define WF_GC16 2u                    // GC16 (full black-flash mode) — id 2 on BOTH hwtcon and mxcfb
 #define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
 #define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
 
@@ -55,10 +56,14 @@ struct nds_platform {
     unsigned long wait_sub;    // *_WAIT_FOR_UPDATE_SUBMISSION (0 = none, e.g. mxcfb)
     unsigned long wait_cmpl;   // *_WAIT_FOR_UPDATE_COMPLETE (for logging / optional per-strip wait)
     uint32_t      size;        // bytes to copy when reissuing an update
+    uint32_t      flags_off;   // byte offset of the `flags` field in the update struct
+    uint32_t      cfa_skip;    // CFA-skip flag bit (skips the per-region colour pass; 0 = n/a)
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36 },  // MTK  (Clara BW/Colour, Libra Colour)
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72 },  // i.MX (Libra 2 & most pre-2024)
+    // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL },
+    // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -93,6 +98,9 @@ static int  nds_strips()      { const char *v = nds_global_config_get("nds_strip
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_wait"); return w && !strcasecmp(w, "complete"); }
 static int  nds_delay_us()    { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : 0; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
+// Set HWTCON_FLAG_CFA_SKIP on the strips (Kaleido): skips the per-region CFA colour pass whose
+// region boundaries produce the seams. Correct for B&W content (no colour to convert).
+static bool nds_cfa_skip()    { return nds_global_config_bool("nds_cfa_skip", true); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
@@ -113,6 +121,7 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     uint8_t v[128];
     if (plat->size > sizeof(v) || sw == 0) { real_ioctl(fd, plat->send, (void *)orig); return; }
 
+    const uint32_t cfa_skip = (plat->cfa_skip && nds_cfa_skip()) ? plat->cfa_skip : 0u;
     bool m_ok = false;
     for (int k = 0; k < N; k++) {
         int col = rtl ? (N - 1 - k) : k;
@@ -124,11 +133,12 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
         wr32(v, OFF_TOP, y0); wr32(v, OFF_LEFT, left); wr32(v, OFF_WIDTH, width); wr32(v, OFF_HEIGHT, H);
         wr32(v, OFF_UPDMODE, UPD_PARTIAL);
         if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
-        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
+        if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);  // no per-region CFA seam
+        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);   // last strip carries Nickel's marker M
         wr32(v, OFF_MARKER, mk);
 
         if (real_ioctl(fd, plat->send, v) < 0) continue;
-        if (last) m_ok = true;
+        if (mk == M) m_ok = true;
 
         if (want_complete) {                         // wait for full render between strips
             uint32_t md[2] = { mk, 0 };
@@ -157,15 +167,20 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         const uint8_t *u = (const uint8_t *)argp;
         uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
         if (nds_turn_pending && w >= 512 && h >= 512) {     // the page-turn update
-            nds_turn_pending = 0;                           // consume the trigger (one sweep per turn)
-            bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
-            static int swept = 0;
-            if (nds_log_ioctl() && swept < 40) { swept++;
-                NDS_LOG("SWEEP [%s] %ux%u marker=%u wf=%u -> %d strips %s", plat->name, w, h,
-                        rd32(u, OFF_MARKER), rd32(u, OFF_WAVEFORM), nds_strips(), rtl ? "R->L" : "L->R");
+            nds_turn_pending = 0;                           // consume the trigger (one per turn)
+            // Only animate FLASHLESS turns. A GC16 update is Nickel's full black-flash ghost-clear;
+            // leave it alone so we never turn a flashless turn into a flash.
+            if (rd32(u, OFF_WAVEFORM) != WF_GC16) {
+                bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                static int swept = 0;
+                if (nds_log_ioctl() && swept < 40) { swept++;
+                    NDS_LOG("SWEEP [%s] %ux%u wf=%u flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
+                            rd32(u, OFF_WAVEFORM), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
+                            (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                }
+                nds_do_sweep(fd, plat, u);
+                return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
             }
-            nds_do_sweep(fd, plat, u);
-            return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
         }
     }
 
@@ -175,9 +190,9 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         if (logged < 160) { logged++;
             if (plat && argp) {
                 const uint8_t *u = (const uint8_t *)argp;
-                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u mode=%s", logged, plat->name,
+                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u mode=%s flags=0x%x", logged, plat->name,
                         rd32(u, OFF_MARKER), rd32(u, OFF_TOP), rd32(u, OFF_LEFT), rd32(u, OFF_WIDTH), rd32(u, OFF_HEIGHT),
-                        rd32(u, OFF_WAVEFORM), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL");
+                        rd32(u, OFF_WAVEFORM), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", rd32(u, plat->flags_off));
             } else if (nds_active && argp && request == nds_active->wait_cmpl) {
                 NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
             } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
@@ -213,9 +228,9 @@ static int nds_init() {
         NDS_LOG("startup: disabled-by-safety marker present; passing through");
         return 0;
     }
-    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(0=keep) dir=%s wait=%s delay=%dus",
+    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(0=keep) dir=%s wait=%s delay=%dus cfa_skip=%d",
             nds_enabled(), nds_sweep_mode() ? "SWEEP" : "observe", nds_strips(), nds_strip_wf(),
-            nds_rtl() ? "R->L" : "L->R", nds_wait_complete() ? "complete" : "submission", nds_delay_us());
+            nds_rtl() ? "R->L" : "L->R", nds_wait_complete() ? "complete" : "submission", nds_delay_us(), nds_cfa_skip());
     return 0;
 }
 static bool nds_del(const char *p) { return access(p, F_OK) != 0 ? true : nh_delete_file(p); }

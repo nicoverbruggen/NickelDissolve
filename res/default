@@ -36,5 +36,9 @@ nds_wait:submission
 # Extra pause between strips, microseconds (0–50000). The animation-speed dial — raise to slow it.
 nds_delay_us:0
 
+# Kaleido only: set HWTCON_FLAG_CFA_SKIP on the strips, skipping the per-region CFA colour pass
+# whose boundaries cause the seams. Correct for B&W text; leave colour pages to the colour-skip.
+nds_cfa_skip:1
+
 # Log the e-ink ioctl stream / sweep events. Set 0 to quieten.
 nds_log_ioctl:1
