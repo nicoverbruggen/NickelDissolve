@@ -1,10 +1,16 @@
 # NickelDissolve
 
+> [!WARNING]
+> **Work in progress — not ready for general use.** This is an experimental prototype under active
+> development. Only a few devices are verified, colour-page handling is incomplete, and the config and
+> behaviour may still change. Try it only if you know what you're doing and don't mind rough edges.
+> (It's reversible and shouldn't brick your device — see [Safety](#safety) — but there are no guarantees.)
+
 A [NickelHook](https://github.com/pgaskin/NickelHook) mod that gives Kobo a **Kindle-style
 directional page-turn animation** — the new page sweeps in as a band-wipe across the screen,
 instead of a single flat refresh.
 
-> **Status: working prototype on the Kobo Clara B&W.** The wipe, greyscale quality, and
+> **Status: working prototype on the Kobo Clara BW.** The wipe, greyscale quality, and
 > automatic forward/back direction all work on-device. See *Platform support* for other models.
 
 ## What it does
@@ -94,7 +100,7 @@ Target coverage: **Elipsa and newer.**
 
 | Device | SoC / interface | Status |
 |---|---|---|
-| **Clara B&W** (Spa BW) | MTK / hwtcon (mono) | ✅ **Tested** — flawless |
+| **Clara BW** (Spa BW) | MTK / hwtcon (mono) | ✅ **Tested** — flawless |
 | **Clara Colour** (Spa Colour) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
 | **Libra Colour** (Monza) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
 | **Elipsa 2E** (Condor) | MTK / hwtcon (mono) | 🟡 Same interface — ready, **untested** |
@@ -125,3 +131,11 @@ Copy `KoboRoot.tgz` to the device's `.kobo/`, eject, and reboot. Then set `nds_m
 
 ## Uninstall
 Delete `.adds/nickeldissolve/uninstall` and reboot.
+
+## Credits
+
+Built with support from large language models, and with prior Kobo modding experience from:
+
+- [NickelHome](https://github.com/nicoverbruggen/NickelHome)
+- [NickelTypeFix](https://github.com/nicoverbruggen/NickelTypeFix)
+- [NickelCoverFix](https://github.com/nicoverbruggen/NickelCoverFix)
