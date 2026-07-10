@@ -1,0 +1,39 @@
+#
+# NickelDissolve configuration   (changes take effect on reboot)
+#
+# Page-turn "band wipe" PoC for the Clara BW: replaces the single full-screen page-turn refresh
+# with a sequence of partial hwtcon updates swept across the screen, so the new page appears
+# strip-by-strip (an approximation of the Kindle wipe — the driver has no native swipe).
+#
+# ── SAFETY ──────────────────────────────────────────────────────────────────────────────
+# Default mode is "observe": nothing is changed, it just logs the hwtcon ioctl stream. Set
+# nds_mode:sweep to enable the wipe. Only full-screen GLR16 page turns are ever touched;
+# everything else passes through untouched. Revert with nds_mode:observe (or delete `uninstall`).
+
+nds_enabled:1
+
+# "observe" = passthrough + log (safe default). "sweep" = do the band-wipe on page turns.
+nds_mode:observe
+
+# Number of vertical strips the wipe is split into (2-32). More = smoother but slower.
+nds_strips:8
+
+# Waveform for each strip:
+#   1 = DU    (2-level, FAST — makes the sweep obvious; text loses grey/antialiasing)
+#   3 = GL16  (16-grey, no flash — nicer text, slower)
+#   4 = GLR16 (Regal grey — matches the normal turn quality, slowest)
+#   6 = A2    (2-level, fastest)
+nds_strip_waveform:1
+
+# Sweep direction: "rtl" (right-to-left, like the Kindle clip) or "ltr".
+nds_direction:rtl
+
+# Between strips, wait for "submission" (fast, recommended — beats the MDP merge) or
+# "complete" (slower, more discrete steps — try this if the strips visually merge together).
+nds_wait:submission
+
+# Extra pause between strips in microseconds (0-50000). Raise if the sweep is too fast to see.
+nds_delay_us:0
+
+# Log the hwtcon ioctl stream / sweep events (first 160/40). Set 0 to quieten.
+nds_log_ioctl:1

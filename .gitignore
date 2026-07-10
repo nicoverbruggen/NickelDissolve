@@ -1,0 +1,10 @@
+# build outputs
+/KoboRoot.tgz
+/tmp/
+src/*.so
+src/*.o
+NickelHook/*.o
+NickelHook/*.moc
+NickelHook/*.moc.o
+NickelHook/nhplugin.json
+.DS_Store

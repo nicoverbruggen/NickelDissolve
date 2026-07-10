@@ -1,0 +1,29 @@
+# NickelDissolve
+
+Gives Kobo a Kindle-style directional page-turn animation: the new page sweeps in as a band-wipe
+across the screen instead of a single flat refresh.
+
+The Kindle's smooth wipe is a native MediaTek hardware "swipe" the Kobo's hwtcon driver doesn't
+have. This mod approximates it from userspace: it intercepts the one full-screen e-ink update
+Nickel issues per page turn and replaces it with a sequence of partial updates over vertical
+strips, swept across the screen. Each strip transitions from the old page to the new one, so the
+sweep reads as a directional wipe. It's a stepped wipe (the driver serialises rapid partials),
+not the perfectly smooth hardware swipe — but with greyscale strips it reads well.
+
+## Setup
+
+1. Install, then set `nds_mode:sweep` in this folder's `config` and reboot.
+2. Tune to taste (see `config`): `nds_strip_waveform:3` (GL16) or `4` (GLR16) for crisp greyscale
+   text; `nds_strips` and `nds_delay_us` for smoothness/speed.
+
+## Safety
+
+- **Default `observe` mode changes nothing** — it forwards every ioctl untouched and just logs.
+- In `sweep`, only the full-screen page-turn update is touched; all other updates (menus, UI,
+  images) pass through unchanged.
+- No hang: the last strip reuses Nickel's update marker, with a fallback to the original update.
+- The hook is `optional` — a firmware/platform mismatch makes the mod inert, not a brick.
+- Backward (previous-page) turns automatically sweep the opposite direction.
+
+Changes take effect on reboot. Set `nds_mode:observe` to disable, or delete the `uninstall` file
+and reboot to remove.
