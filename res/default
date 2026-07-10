@@ -36,6 +36,11 @@ nds_wait:submission
 # Extra pause between strips, microseconds (0–50000). The animation-speed dial — raise to slow it.
 nds_delay_us:0
 
+# Which gesture animates. false (default): only SWIPES animate; a TAP turns instantly. true: taps
+# animate too, but taps aren't individually hookable, so it animates any full-screen page render
+# (may catch the odd non-turn refresh) and taps reuse the last swipe's direction. See the README.
+nds_tap_animates:0
+
 # Kaleido only: set HWTCON_FLAG_CFA_SKIP on the strips, skipping the per-region CFA colour pass
 # whose boundaries cause the seams. Correct for B&W text; leave colour pages to the colour-skip.
 nds_cfa_skip:1

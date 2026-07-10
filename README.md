@@ -49,12 +49,28 @@ offset — no per-struct code. Screen dimensions are read from the update itself
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); back turns flip automatically |
 | `nds_wait` | `submission` | between strips wait for `submission` (fast) or `complete` (slower, more discrete) |
 | `nds_delay_us` | 0 | extra pause between strips, µs (0–50000) — the animation-speed dial |
+| `nds_tap_animates` | 0 | `0` = only **swipes** animate (a **tap** turns instantly); `1` = taps animate too (see *Swipe vs tap* below) |
 | `nds_cfa_skip` | 1 | **Kaleido colour panels:** skip the per-region CFA colour pass on the strips (removes the boundary seams). Correct for B&W; no-op on mono/i.MX |
 | `nds_log_ioctl` | 1 | log the ioctl stream / sweep events |
 
 Changes take effect on reboot (config is read once at startup). Tuning guide: leave
 `nds_strip_waveform:0` (keep) for best quality on any device; use `nds_strips`/`nds_delay_us`
 for smoothness/speed.
+
+## Swipe vs tap
+
+By default, **the animation fires on a swipe but not on a tap** — a tapped page turn is instant.
+This is deliberate, and it falls out of how the sweep is triggered: the animation is armed by hooking
+`ReadingView::nextPageWithTimer` / `prevPageWithTimer`, which is the path a **swipe** gesture takes.
+A **tap**-to-turn goes through `nextPage` / `prevPage`, which are not PLT-hookable (`ABS32`-only), so
+a tap never arms the sweep. Many people like this split (a deliberate swipe animates; a quick tap
+stays instant), so it's the default.
+
+Set **`nds_tap_animates:1`** to animate taps too. Caveat, because taps can't be hooked individually:
+in this mode the sweep is armed by **any** full-screen page render, so (a) it may occasionally
+animate a non-turn full-screen refresh, and (b) a tap has no direction signal, so tapped turns reuse
+the **last swipe's** direction (or the configured `nds_direction` if you haven't swiped yet).
+Recommended only if you turn primarily by tapping and don't mind those trade-offs.
 
 ## Safety
 
@@ -68,18 +84,36 @@ for smoothness/speed.
   fixed by the next refresh — recoverable, not a brick.
 - Revert with `nds_mode:observe`, or delete `.adds/nickeldissolve/uninstall` and reboot.
 
-## Platform support
+## Device support
 
-The `hwtcon` (MTK) and `mxcfb` (i.MX) update paths are both in the platform table, so the mod
-targets any of these — but only the Clara B&W is verified so far.
+The mod drives two e-ink update interfaces via its platform table — **`hwtcon`** (MediaTek) and
+**`mxcfb`** (i.MX). It auto-detects which from the intercepted ioctl, so one build covers both. On
+any other platform (or a device not listed) it simply stays **inert** — no animation, no risk.
 
-- **Clara B&W** (MTK/hwtcon, "Spa BW") — **working, tested.**
-- **Clara Colour / Libra Colour** (MTK/hwtcon, "Spa Colour" / "Monza") — *should* work: same
-  interface, and reusing the turn's own waveform preserves colour/CFA pages. **Untested** — run in
-  `observe` first, then `sweep`.
-- **Libra 2 & most pre-2024 Kobos** (i.MX/`mxcfb`) — the mxcfb path is wired up but **untested**;
-  i.MX turns use `REAGL` (partial), which the turn-armed trigger handles. Try `observe` first.
-- **Older AllWinner / other** Kobos — not in the table; the mod loads but is inert (safe).
+Target coverage: **Elipsa and newer.**
+
+| Device | SoC / interface | Status |
+|---|---|---|
+| **Clara B&W** (Spa BW) | MTK / hwtcon (mono) | ✅ **Tested** — flawless |
+| **Clara Colour** (Spa Colour) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
+| **Libra Colour** (Monza) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
+| **Elipsa 2E** (Condor) | MTK / hwtcon (mono) | 🟡 Same interface — ready, **untested** |
+| **Libra 2** (Io) | i.MX / mxcfb (mx6sll) | 🟡 In the platform table — ready, **untested** |
+| **Clara 2E** (Goldfinch) | i.MX / mxcfb | 🟡 In the platform table — ready, **untested** |
+| **Sage** (Cadmus) | **AllWinner / sunxi** (B300) | ⏳ **Planned** — needs the sunxi code path |
+| **Elipsa** (Europa) | **AllWinner / sunxi** (B300) | ⏳ **Planned** — needs the sunxi code path |
+
+The sunxi devices (Elipsa, Sage) use a **different update interface** (`DISP_EINK_UPDATE`, a
+pointer-based struct, `frame_id` tracking) that doesn't fit the flat offset table — a dedicated code
+path is in progress. Until then the mod is **inert** on them (safe, just no animation).
+
+**Colour devices (Kaleido):** the strip-by-strip sweep would corrupt a *colour* page (the CFA
+colour conversion needs the whole frame), so only B&W/greyscale turns are animated cleanly; see
+`nds_cfa_skip`. **Colour-page detection/skip is still a TODO.**
+
+**Trying an untested device:** install in `nds_mode:observe` first — it changes nothing and logs
+the ioctl stream. Confirm the log shows a platform (`[hwtcon]`/`[mxcfb]`) and `turn:` lines, then
+switch to `sweep`. If the log shows neither, the device isn't on a supported interface.
 
 ## Build & install
 

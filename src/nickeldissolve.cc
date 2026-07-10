@@ -98,6 +98,10 @@ static int  nds_strips()      { const char *v = nds_global_config_get("nds_strip
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_wait"); return w && !strcasecmp(w, "complete"); }
 static int  nds_delay_us()    { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : 0; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
+// false (default): only swipe turns animate (they route through the hookable next/prevPageWithTimer,
+// which also give us direction). true: also animate taps — but taps aren't individually hookable, so
+// this arms on ANY full-screen page render, using the last swipe's direction (see README caveats).
+static bool nds_tap_animates(){ return nds_global_config_bool("nds_tap_animates", false); }
 // Set HWTCON_FLAG_CFA_SKIP on the strips (Kaleido): skips the per-region CFA colour pass whose
 // region boundaries produce the seams. Correct for B&W content (no colour to convert).
 static bool nds_cfa_skip()    { return nds_global_config_bool("nds_cfa_skip", true); }
@@ -166,7 +170,8 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 
         const uint8_t *u = (const uint8_t *)argp;
         uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
-        if (nds_turn_pending && w >= 512 && h >= 512) {     // the page-turn update
+        // Armed by a swipe (turn hook) — or, if nds_tap_animates, by any full-screen page render (taps).
+        if ((nds_turn_pending || nds_tap_animates()) && w >= 512 && h >= 512) {
             nds_turn_pending = 0;                           // consume the trigger (one per turn)
             // Only animate FLASHLESS turns. A GC16 update is Nickel's full black-flash ghost-clear;
             // leave it alone so we never turn a flashless turn into a flash.
@@ -228,9 +233,9 @@ static int nds_init() {
         NDS_LOG("startup: disabled-by-safety marker present; passing through");
         return 0;
     }
-    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(0=keep) dir=%s wait=%s delay=%dus cfa_skip=%d",
+    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(0=keep) dir=%s wait=%s delay=%dus cfa_skip=%d tap=%d",
             nds_enabled(), nds_sweep_mode() ? "SWEEP" : "observe", nds_strips(), nds_strip_wf(),
-            nds_rtl() ? "R->L" : "L->R", nds_wait_complete() ? "complete" : "submission", nds_delay_us(), nds_cfa_skip());
+            nds_rtl() ? "R->L" : "L->R", nds_wait_complete() ? "complete" : "submission", nds_delay_us(), nds_cfa_skip(), nds_tap_animates());
     return 0;
 }
 static bool nds_del(const char *p) { return access(p, F_OK) != 0 ? true : nh_delete_file(p); }
