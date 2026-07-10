@@ -17,25 +17,26 @@ NickelDissolve approximates it from userspace: it intercepts the single full-scr
 update Nickel issues per page turn and replaces it with a **sequence of partial updates over
 vertical strips, swept across the screen**. The framebuffer already holds the new page, so each
 strip transitions that band from the old page to the new one — sweeping the bands reads as a
-directional wipe. No driver patching; only the driver's public `HWTCON_SEND_UPDATE` ioctl.
+directional wipe. No driver patching; only the driver's public update ioctl.
 
-Because it's a serial sequence of partial refreshes (the driver's MDP coalesces rapid updates, so
-each strip waits for submission), it is a **stepped** wipe, not the perfectly smooth hardware
-swipe — but with enough strips and greyscale (GL16/GLR16) it reads well.
+It's a serial sequence of partial refreshes, so it's a **stepped** wipe, not the perfectly smooth
+hardware swipe — but with enough strips it reads well.
 
 ## How it works
 
 Three hooks, all resolved by symbol name (so no per-firmware offsets):
 
-- **`ioctl`** (in `libkobo`) — watches for the page-turn `HWTCON_SEND_UPDATE` (a full-screen
-  `GLR16 FULL` update) and, in `sweep` mode, replaces it with N swept partial-strip updates. The
-  **last strip reuses Nickel's original update marker**, so Nickel's following
-  `WAIT_FOR_UPDATE_COMPLETE` resolves normally — no hang. If that strip ever fails to submit, it
-  falls back to the original full update.
-- **`ReadingView::nextPageWithTimer` / `prevPageWithTimer`** (in `libnickel`) — record the turn
-  direction just before the update, so a **backward** turn sweeps the **opposite** way.
+- **`ReadingView::nextPageWithTimer` / `prevPageWithTimer`** (in `libnickel`) — fire on a page
+  turn. They **arm the sweep** and record the direction (a backward turn sweeps the opposite way).
+- **`ioctl`** (in `libkobo`) — when a turn is armed, the next full-screen e-ink update is the page
+  render; in `sweep` mode it's replaced with N swept partial-strip updates. Each strip **reuses
+  the turn's own waveform** (so whatever the device/page uses — GLR16, REAGL, a Kaleido CFA mode —
+  is preserved). The **last strip reuses Nickel's update marker**, so its following
+  `WAIT_FOR_UPDATE_COMPLETE` resolves — no hang; a fallback resubmits the original if that strip fails.
 
-Screen dimensions are read from the intercepted update itself, so it is resolution-independent.
+**Kobo-agnostic.** The two Kobo e-ink interfaces (`hwtcon` on MTK, `mxcfb` on i.MX) share the same
+update-struct prefix, so the mod recognises either by its ioctl number and drives it by field
+offset — no per-struct code. Screen dimensions are read from the update itself (resolution-independent).
 
 ## Config (`.adds/nickeldissolve/config`)
 
@@ -44,20 +45,22 @@ Screen dimensions are read from the intercepted update itself, so it is resoluti
 | `nds_enabled` | 1 | master switch |
 | `nds_mode` | `observe` | `observe` = passthrough + log (safe); `sweep` = do the wipe |
 | `nds_strips` | 8 | number of vertical bands (2–32). More = smoother + slower |
-| `nds_strip_waveform` | 1 | per-strip waveform: **1**=DU (fast, 2-level), **3**=GL16 (grey), **4**=GLR16 (Regal, best/slowest), 6=A2 |
+| `nds_strip_waveform` | 0 | **0 = keep the turn's own waveform** (recommended, works on any device/colour). Non-zero forces a raw, **platform-specific** id (hwtcon: 1=DU 3=GL16 4=GLR16 6=A2; mxcfb differs) |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); back turns flip automatically |
 | `nds_wait` | `submission` | between strips wait for `submission` (fast) or `complete` (slower, more discrete) |
 | `nds_delay_us` | 0 | extra pause between strips, µs (0–50000) — the animation-speed dial |
 | `nds_log_ioctl` | 1 | log the hwtcon ioctl stream / sweep events |
 
-Changes take effect on reboot (config is read once at startup). Tuning guide: `nds_strip_waveform:3`
-or `4` for antialiased text; `nds_strips`/`nds_delay_us` for smoothness/speed.
+Changes take effect on reboot (config is read once at startup). Tuning guide: leave
+`nds_strip_waveform:0` (keep) for best quality on any device; use `nds_strips`/`nds_delay_us`
+for smoothness/speed.
 
 ## Safety
 
 - **`observe` (default) changes nothing** — it forwards every ioctl untouched and only logs.
-- In `sweep`, **only a full-screen `GLR16 FULL` update is ever touched**; all other ioctls pass
-  through byte-for-byte, so menus/UI/images are unaffected.
+- In `sweep`, **only the full-screen update immediately following a page turn is ever touched**
+  (and the arming expires after ~2 s); all other ioctls pass through byte-for-byte, so
+  menus/UI/images are unaffected.
 - **No hang:** the last strip carries Nickel's marker; a hang-safety fallback resubmits the
   original update if that strip fails.
 - Hook is `optional` (firmware mismatch = inert). Worst realistic failure is a garbled frame
@@ -66,13 +69,16 @@ or `4` for antialiased text; `nds_strips`/`nds_delay_us` for smoothness/speed.
 
 ## Platform support
 
+The `hwtcon` (MTK) and `mxcfb` (i.MX) update paths are both in the platform table, so the mod
+targets any of these — but only the Clara B&W is verified so far.
+
 - **Clara B&W** (MTK/hwtcon, "Spa BW") — **working, tested.**
-- **Clara Colour / Libra Colour** (also MTK/hwtcon, "Spa Colour" / "Monza") — should run
-  unchanged for B&W book turns; Kaleido *colour* pages may use a different waveform (gate won't
-  match → no wipe, safe) or need CFA handling. Run in `observe` first to confirm.
-- **Libra 2 and most pre-2024 Kobos** (i.MX/NXP `mxcfb`, or AllWinner) — **different platform.**
-  The mod loads but is **inert** (its hwtcon ioctl is never issued). A port would need the mxcfb
-  `MXCFB_SEND_UPDATE` path (different ioctl/struct/waveform ids).
+- **Clara Colour / Libra Colour** (MTK/hwtcon, "Spa Colour" / "Monza") — *should* work: same
+  interface, and reusing the turn's own waveform preserves colour/CFA pages. **Untested** — run in
+  `observe` first, then `sweep`.
+- **Libra 2 & most pre-2024 Kobos** (i.MX/`mxcfb`) — the mxcfb path is wired up but **untested**;
+  i.MX turns use `REAGL` (partial), which the turn-armed trigger handles. Try `observe` first.
+- **Older AllWinner / other** Kobos — not in the table; the mod loads but is inert (safe).
 
 ## Build & install
 

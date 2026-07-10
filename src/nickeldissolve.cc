@@ -1,26 +1,28 @@
-// NickelDissolve — a page-turn "band wipe" PoC for the Kobo Clara BW (MTK/hwtcon).
+// NickelDissolve — a Kobo-agnostic page-turn "band wipe".
 //
-// The Kindle's smooth wipe is a native MediaTek mxcfb swipe primitive the Kobo hwtcon driver
-// does NOT expose. The only approximation from userspace: take the ONE full-screen update Nickel
-// issues per page turn and replace it with a SEQUENCE of partial updates over vertical strips,
-// swept across the screen, so the new page appears strip-by-strip. We use only the driver's
-// public ioctl interface (HWTCON_SEND_UPDATE) — no driver patching.
+// A Kindle page turn sweeps the new page in as a directional wipe (a native MediaTek hardware
+// "swipe" the Kobo drivers don't expose). NickelDissolve approximates it from userspace: it takes
+// the single full-screen e-ink update Nickel issues per page turn and replaces it with a SEQUENCE
+// of partial updates over vertical strips, swept across the screen, so the new page appears
+// strip-by-strip. Only the driver's public update ioctl is used — no driver patching.
 //
-// Observed page-turn ioctl sequence (from the observe build):
-//   SEND_UPDATE  marker=M  region=(0,0, 1072x1448)  wf=4(GLR16)  mode=FULL
-//   WAIT_FOR_UPDATE_SUBMISSION
-//   WAIT_FOR_UPDATE_COMPLETE  marker=M
-// So a turn is a single full-screen GLR16 FULL update Nickel then blocks on (marker M).
+// PLATFORM-AGNOSTIC. Kobo has two e-ink update interfaces with the SAME update-struct prefix
+// (region@0, waveform_mode@16, update_mode@20, update_marker@24 — hwtcon was modelled on mxcfb):
+//   * hwtcon (MTK)  — Clara BW/Colour, Libra Colour, Elipsa 2E : HWTCON_SEND_UPDATE 0x4024462E
+//   * mxcfb  (i.MX) — Libra 2 & most pre-2024                  : MXCFB_SEND_UPDATE  0x4048462E
+// We recognise either by its ioctl number and drive it by field offset, so no per-struct code.
 //
-// Injection (mode:sweep): when we see that full-screen GLR16 FULL update we DON'T forward it;
-// instead we issue N partial strip updates sweeping across, waiting for submission between each
-// (to beat the driver's MDP merge). The LAST strip reuses Nickel's original marker M, so its
-// subsequent WAIT_FOR_UPDATE_COMPLETE(M) resolves normally — no hang. Then we return 0 (success).
+// TRIGGER. Instead of gating on a specific waveform (MTK-only, and wrong for colour/CFA pages), we
+// mark a turn "pending" from ReadingView::next/prevPageWithTimer and sweep the next full-screen
+// update. We REUSE that update's own waveform, so whatever the device/page uses (GLR16, REAGL, a
+// Kaleido CFA mode…) is preserved — the wipe is just that update, chopped into swept strips.
 //
-// SAFETY: default mode is "observe" (pure passthrough + logging — installing changes nothing).
-// Only full-screen GLR16 FULL updates are ever touched; everything else passes through byte-for-
-// byte. Worst case of a bad sweep is a garbled frame fixed by the next full refresh — recoverable,
-// not a brick. Hook is `optional`. Revert with nds_mode:observe or delete the uninstall file.
+// NO HANG. Nickel does WAIT_FOR_UPDATE_COMPLETE(M) after the turn; the LAST strip reuses its marker
+// M, so that wait resolves. If the last strip fails to submit, we resubmit the original update.
+//
+// SAFETY. Default mode is "observe" (pure passthrough + logging). In "sweep", only a full-screen
+// update that immediately follows a page turn is ever touched; everything else passes byte-for-byte.
+// Worst case of a bad sweep is a garbled frame fixed by the next refresh — recoverable, not a brick.
 
 #include <cstdlib>
 #include <cstdint>
@@ -28,6 +30,7 @@
 #include <cstring>
 #include <strings.h>
 #include <unistd.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #include <NickelHook.h>
@@ -38,151 +41,146 @@
 static const char *const NDS_LIBKOBO   = "/usr/local/Kobo/platforms/libkobo.so";
 static const char *const NDS_LIBNICKEL = "/usr/local/Kobo/libnickel.so.1.0.0";
 
-// ---- hwtcon ioctl interface (FBInk eink/mtk-kobo.h + KOReader, verified vs the on-device log) ----
-#define NDS_HWTCON_SEND_UPDATE                0x4024462EUL // _IOW('F',0x2E, hwtcon_update_data[36])
-#define NDS_HWTCON_WAIT_FOR_UPDATE_COMPLETE   0xC008462FUL // _IOWR('F',0x2F, marker_data[8])
-#define NDS_HWTCON_WAIT_FOR_UPDATE_SUBMISSION 0x40044637UL // _IOW('F',0x37, uint32_t)  (corrected)
-#define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
-#define NDS_IOC_NR(req)    ((req) & 0xFFU)
-
-enum { WF_DU = 1, WF_GC16 = 2, WF_GL16 = 3, WF_GLR16 = 4, WF_A2 = 6 };
+// ---- update-struct field offsets (common to hwtcon & mxcfb) ----
+enum { OFF_TOP = 0, OFF_LEFT = 4, OFF_WIDTH = 8, OFF_HEIGHT = 12,
+       OFF_WAVEFORM = 16, OFF_UPDMODE = 20, OFF_MARKER = 24 };
 enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
+#define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
+#define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
 
-struct nds_hwtcon_rect { uint32_t top, left, width, height; };
-struct nds_hwtcon_update_data {
-    struct nds_hwtcon_rect update_region;
-    uint32_t waveform_mode;
-    uint32_t update_mode;   // 0 = PARTIAL, 1 = FULL
-    uint32_t update_marker;
-    uint32_t flags;
-    int32_t  dither_mode;
+// ---- platform table: which ioctls carry an e-ink update, per driver ----
+struct nds_platform {
+    const char   *name;
+    unsigned long send;        // *_SEND_UPDATE (intercept + reissue partial strips)
+    unsigned long wait_sub;    // *_WAIT_FOR_UPDATE_SUBMISSION (0 = none, e.g. mxcfb)
+    unsigned long wait_cmpl;   // *_WAIT_FOR_UPDATE_COMPLETE (for logging / optional per-strip wait)
+    uint32_t      size;        // bytes to copy when reissuing an update
 };
-struct nds_hwtcon_marker_data { uint32_t update_marker; uint32_t collision_test; };
+static const struct nds_platform NDS_PLATFORMS[] = {
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36 },  // MTK  (Clara BW/Colour, Libra Colour)
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72 },  // i.MX (Libra 2 & most pre-2024)
+};
+static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
-static const char *wf_name(uint32_t m) {
-    switch (m) { case WF_DU: return "DU"; case WF_GC16: return "GC16"; case WF_GL16: return "GL16";
-                 case WF_GLR16: return "GLR16"; case WF_A2: return "A2"; default: return "?"; }
+static const struct nds_platform *nds_match(unsigned long request) {
+    for (int i = 0; i < NDS_NPLAT; i++)
+        if (request == NDS_PLATFORMS[i].send) return &NDS_PLATFORMS[i];
+    return nullptr;
 }
 
-static int (*real_waveformModeFromQt)(void *self, uint64_t flags) = nullptr;
-static int (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
+// unaligned-safe field access
+static inline uint32_t rd32(const uint8_t *b, unsigned off) { uint32_t v; memcpy(&v, b + off, 4); return v; }
+static inline void     wr32(uint8_t *b, unsigned off, uint32_t v) { memcpy(b + off, &v, 4); }
+
+static int  (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
 static void (*real_nextPageWithTimer)(void *self) = nullptr;
 static void (*real_prevPageWithTimer)(void *self) = nullptr;
 
 static bool nds_safety_disabled = false;
-static int  nds_turn_dir = 0;   // 0 = forward (next page), 1 = backward (prev page)
-static uint32_t nds_ephemeral_marker = 0xF0000000u;   // for the non-final strips (won't collide with Nickel's)
+static int  nds_turn_dir = 0;                 // 0 = forward (next), 1 = backward (prev)
+static volatile int  nds_turn_pending = 0;    // a page turn just fired; sweep its next full update
+static volatile long nds_turn_ts = 0;         // time() when the turn fired (staleness guard)
+static uint32_t nds_ephemeral_marker = 0xF0000000u;   // markers for non-final strips (never collide with Nickel)
+static const struct nds_platform *nds_active = nullptr;   // detected from the first update ioctl (for logging)
+
+static long nds_now() { return (long)time(nullptr); }
 
 // ---- config -----------------------------------------------------------------------------
 static bool nds_enabled()     { return nds_global_config_bool("nds_enabled", true); }
 static bool nds_log_ioctl()   { return nds_global_config_bool("nds_log_ioctl", true); }
-static bool nds_sweep_mode()  {
-    const char *m = nds_global_config_get("nds_mode");
-    return m && !strcasecmp(m, "sweep");
-}
-static int nds_strips() {
-    const char *v = nds_global_config_get("nds_strips");
-    int n = (v && *v) ? atoi(v) : 8;
-    if (n < 2) n = 2; if (n > 32) n = 32;
-    return n;
-}
-static uint32_t nds_strip_wf() {
-    const char *v = nds_global_config_get("nds_strip_waveform");
-    int w = (v && *v) ? atoi(v) : WF_DU;   // default DU: fast, makes the sweep obvious (2-level)
-    if (w == WF_DU || w == WF_GL16 || w == WF_GLR16 || w == WF_A2) return (uint32_t)w;
-    return WF_DU;
-}
-static bool nds_rtl() {  // right-to-left (Kindle direction) by default
-    const char *d = nds_global_config_get("nds_direction");
-    return !(d && !strcasecmp(d, "ltr"));
-}
-static bool nds_wait_complete() {  // wait for full completion between strips (slower, more discrete)
-    const char *w = nds_global_config_get("nds_wait");
-    return w && !strcasecmp(w, "complete");
-}
-static int nds_delay_us() {
-    const char *v = nds_global_config_get("nds_delay_us");
-    int d = (v && *v) ? atoi(v) : 0;
-    if (d < 0) d = 0; if (d > 50000) d = 50000;
-    return d;
-}
+static bool nds_sweep_mode()  { const char *m = nds_global_config_get("nds_mode"); return m && !strcasecmp(m, "sweep"); }
+static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : 8; if (n < 2) n = 2; if (n > 32) n = 32; return n; }
+static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
+static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_wait"); return w && !strcasecmp(w, "complete"); }
+static int  nds_delay_us()    { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : 0; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
+// 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
+// (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
+static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
 
 // ---- the sweep: replace one full-screen update with N swept partial strips ----------------
-static void nds_do_sweep(int fd, const struct nds_hwtcon_update_data *orig) {
-    const uint32_t M = orig->update_marker;
+static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t *orig) {
+    const uint32_t M  = rd32(orig, OFF_MARKER);
+    const uint32_t x0 = rd32(orig, OFF_LEFT), y0 = rd32(orig, OFF_TOP);
+    const uint32_t W  = rd32(orig, OFF_WIDTH), H = rd32(orig, OFF_HEIGHT);
     const int N = nds_strips();
-    const uint32_t x0 = orig->update_region.left, y0 = orig->update_region.top;
-    const uint32_t W  = orig->update_region.width, H = orig->update_region.height;
     const uint32_t sw = W / (uint32_t)N;
-    const uint32_t wf = nds_strip_wf();
-    bool rtl = nds_rtl();
-    if (nds_turn_dir == 1) rtl = !rtl;   // a backward (prev-page) turn sweeps the opposite way
+    const uint32_t wf_override = nds_strip_wf();     // 0 = keep original
     const int delay = nds_delay_us();
+    const bool want_complete = nds_wait_complete();
+    bool rtl = nds_rtl();
+    if (nds_turn_dir == 1) rtl = !rtl;               // backward turn sweeps the opposite way
 
-    bool m_submitted = false;   // Nickel will WAIT_COMPLETE(M); M MUST get submitted or it hangs.
+    uint8_t v[128];
+    if (plat->size > sizeof(v) || sw == 0) { real_ioctl(fd, plat->send, (void *)orig); return; }
+
+    bool m_ok = false;
     for (int k = 0; k < N; k++) {
-        int col = rtl ? (N - 1 - k) : k;                 // k = render order; col = screen column
+        int col = rtl ? (N - 1 - k) : k;
         uint32_t left  = x0 + (uint32_t)col * sw;
         uint32_t width = (col == N - 1) ? (x0 + W - left) : sw;   // last column takes the remainder
         bool last = (k == N - 1);
 
-        struct nds_hwtcon_update_data v = *orig;
-        v.update_region.top = y0; v.update_region.left = left;
-        v.update_region.width = width; v.update_region.height = H;
-        v.update_mode   = UPD_PARTIAL;
-        v.waveform_mode = wf;
-        v.update_marker = last ? M : (nds_ephemeral_marker + (uint32_t)k);
+        memcpy(v, orig, plat->size);
+        wr32(v, OFF_TOP, y0); wr32(v, OFF_LEFT, left); wr32(v, OFF_WIDTH, width); wr32(v, OFF_HEIGHT, H);
+        wr32(v, OFF_UPDMODE, UPD_PARTIAL);
+        if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
+        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
+        wr32(v, OFF_MARKER, mk);
 
-        if (real_ioctl(fd, NDS_HWTCON_SEND_UPDATE, &v) < 0) continue;
-        if (last) m_submitted = true;
+        if (real_ioctl(fd, plat->send, v) < 0) continue;
+        if (last) m_ok = true;
 
-        if (nds_wait_complete()) {
-            struct nds_hwtcon_marker_data md = { v.update_marker, 0 };
-            real_ioctl(fd, NDS_HWTCON_WAIT_FOR_UPDATE_COMPLETE, &md);
-        } else {
-            uint32_t wm = v.update_marker;
-            real_ioctl(fd, NDS_HWTCON_WAIT_FOR_UPDATE_SUBMISSION, &wm);
-        }
+        if (want_complete) {                         // wait for full render between strips
+            uint32_t md[2] = { mk, 0 };
+            if (plat->wait_cmpl) real_ioctl(fd, plat->wait_cmpl, md);
+        } else if (plat->wait_sub) {                 // hwtcon: wait for submission (beats the MDP merge)
+            uint32_t wm = mk;
+            real_ioctl(fd, plat->wait_sub, &wm);
+        }                                            // mxcfb: no wait needed (no MDP merge)
         if (delay > 0 && !last) usleep((useconds_t)delay);
     }
-    // Hang-safety: if the marker-M strip never submitted, submit the ORIGINAL full update so
-    // Nickel's WAIT_COMPLETE(M) resolves (falls back to a normal full refresh, not the wipe).
-    if (!m_submitted) real_ioctl(fd, NDS_HWTCON_SEND_UPDATE, (void *)orig);
-    nds_ephemeral_marker += (uint32_t)N;   // keep ephemeral markers moving (still far from Nickel's)
+    // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
+    if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
+    nds_ephemeral_marker += (uint32_t)N;
 }
 
 // ---- ioctl hook -------------------------------------------------------------------------
 extern "C" __attribute__((visibility("default")))
 int _nds_ioctl(int fd, unsigned long request, void *argp) {
-    if (nds_enabled() && !nds_safety_disabled && request == NDS_HWTCON_SEND_UPDATE && argp && real_ioctl) {
-        const struct nds_hwtcon_update_data *u = (const struct nds_hwtcon_update_data *)argp;
-        // Only a full-screen GLR16 FULL update is a reading page turn. Sweep only that.
-        if (nds_sweep_mode() && u->update_mode == UPD_FULL && u->waveform_mode == WF_GLR16
-                && u->update_region.width >= 512 && u->update_region.height >= 512) {
+    const struct nds_platform *plat = nds_match(request);
+    if (plat && argp) nds_active = plat;
+
+    if (plat && argp && real_ioctl && nds_enabled() && !nds_safety_disabled && nds_sweep_mode()) {
+        // Expire a stale pending-turn so we never sweep an unrelated later full-screen update.
+        if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
+
+        const uint8_t *u = (const uint8_t *)argp;
+        uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
+        if (nds_turn_pending && w >= 512 && h >= 512) {     // the page-turn update
+            nds_turn_pending = 0;                           // consume the trigger (one sweep per turn)
+            bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
             static int swept = 0;
             if (nds_log_ioctl() && swept < 40) { swept++;
-                NDS_LOG("SWEEP turn marker=%u %ux%u -> %d strips wf=%u(%s) %s",
-                        u->update_marker, u->update_region.width, u->update_region.height,
-                        nds_strips(), nds_strip_wf(), wf_name(nds_strip_wf()), nds_rtl() ? "R->L" : "L->R");
+                NDS_LOG("SWEEP [%s] %ux%u marker=%u wf=%u -> %d strips %s", plat->name, w, h,
+                        rd32(u, OFF_MARKER), rd32(u, OFF_WAVEFORM), nds_strips(), rtl ? "R->L" : "L->R");
             }
-            nds_do_sweep(fd, u);
-            return 0;   // suppress the original full update; Nickel's WAIT_COMPLETE(M) resolves via the last strip
+            nds_do_sweep(fd, plat, u);
+            return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
         }
     }
 
-    // observe: log the hwtcon ioctl stream (first 160), passthrough unchanged
+    // observe: log the e-ink ioctl stream (first 160), passthrough unchanged
     if (nds_enabled() && !nds_safety_disabled && nds_log_ioctl() && NDS_IOC_MAGIC(request) == 0x46) {
         static int logged = 0;
         if (logged < 160) { logged++;
-            if (request == NDS_HWTCON_SEND_UPDATE && argp) {
-                const struct nds_hwtcon_update_data *u = (const struct nds_hwtcon_update_data *)argp;
-                NDS_LOG("ioctl #%d SEND_UPDATE marker=%u region=(t%u,l%u,%ux%u) wf=%u(%s) mode=%s",
-                        logged, u->update_marker, u->update_region.top, u->update_region.left,
-                        u->update_region.width, u->update_region.height,
-                        u->waveform_mode, wf_name(u->waveform_mode), u->update_mode == UPD_FULL ? "FULL" : "PARTIAL");
-            } else if (request == NDS_HWTCON_WAIT_FOR_UPDATE_COMPLETE && argp) {
+            if (plat && argp) {
+                const uint8_t *u = (const uint8_t *)argp;
+                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u mode=%s", logged, plat->name,
+                        rd32(u, OFF_MARKER), rd32(u, OFF_TOP), rd32(u, OFF_LEFT), rd32(u, OFF_WIDTH), rd32(u, OFF_HEIGHT),
+                        rd32(u, OFF_WAVEFORM), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL");
+            } else if (nds_active && argp && request == nds_active->wait_cmpl) {
                 NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
-            } else if (request == NDS_HWTCON_WAIT_FOR_UPDATE_SUBMISSION && argp) {
+            } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
                 NDS_LOG("ioctl #%d WAIT_SUBMISSION marker=%u", logged, *(const uint32_t *)argp);
             }
         }
@@ -193,24 +191,16 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     return -1;
 }
 
-// ---- waveform hook (log-only context; cheap) --------------------------------------------
-extern "C" __attribute__((visibility("default")))
-int _nds_waveformModeFromQt(void *self, uint64_t flags) {
-    return real_waveformModeFromQt ? real_waveformModeFromQt(self, flags) : WF_GC16;
-}
-
-// ---- page-turn direction: record which way the turn goes so the sweep can match ----------
-// The ioctl update is identical for forward/back turns, so we learn direction here (called on
-// the same thread, just before the update). Forward => configured direction; back => opposite.
+// ---- page-turn hooks: arm the sweep + record direction ----------------------------------
 extern "C" __attribute__((visibility("default")))
 void _nds_nextPageWithTimer(void *self) {
-    nds_turn_dir = 0;
+    nds_turn_dir = 0; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: forward"); }
     if (real_nextPageWithTimer) real_nextPageWithTimer(self);
 }
 extern "C" __attribute__((visibility("default")))
 void _nds_prevPageWithTimer(void *self) {
-    nds_turn_dir = 1;
+    nds_turn_dir = 1; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: backward"); }
     if (real_prevPageWithTimer) real_prevPageWithTimer(self);
 }
@@ -223,10 +213,9 @@ static int nds_init() {
         NDS_LOG("startup: disabled-by-safety marker present; passing through");
         return 0;
     }
-    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(%s) dir=%s wait=%s delay=%dus ioctl=%p",
-            nds_enabled(), nds_sweep_mode() ? "SWEEP" : "observe", nds_strips(),
-            nds_strip_wf(), wf_name(nds_strip_wf()), nds_rtl() ? "R->L" : "L->R",
-            nds_wait_complete() ? "complete" : "submission", nds_delay_us(), (void *)real_ioctl);
+    NDS_LOG("startup: enabled=%d mode=%s strips=%d strip_wf=%u(0=keep) dir=%s wait=%s delay=%dus",
+            nds_enabled(), nds_sweep_mode() ? "SWEEP" : "observe", nds_strips(), nds_strip_wf(),
+            nds_rtl() ? "R->L" : "L->R", nds_wait_complete() ? "complete" : "submission", nds_delay_us());
     return 0;
 }
 static bool nds_del(const char *p) { return access(p, F_OK) != 0 ? true : nh_delete_file(p); }
@@ -247,7 +236,7 @@ static bool nds_uninstall() {
 // ---- NickelHook wiring -------------------------------------------------------------------
 static struct nh_info NickelDissolveInfo = {
     .name            = "NickelDissolve",
-    .desc            = "Page-turn band-wipe PoC (hwtcon partial-update sweep).",
+    .desc            = "Kindle-style directional page-turn band-wipe (Kobo-agnostic).",
     .uninstall_flag  = NDS_CONFIG_DIR "/uninstall-now",
     .uninstall_xflag = NDS_CONFIG_DIR "/uninstall",
     .failsafe_delay  = 3,
@@ -255,16 +244,13 @@ static struct nh_info NickelDissolveInfo = {
 static struct nh_hook NickelDissolveHooks[] = {
     { .sym = "ioctl", .sym_new = "_nds_ioctl",
       .lib = NDS_LIBKOBO, .out = nh_symoutptr(real_ioctl),
-      .desc = "intercept the HWTCON page-turn update and sweep it", .optional = true },
-    { .sym = "_ZNK13KoboScreenMTK18waveformModeFromQtEy", .sym_new = "_nds_waveformModeFromQt",
-      .lib = NDS_LIBKOBO, .out = nh_symoutptr(real_waveformModeFromQt),
-      .desc = "waveform context (log-only)", .optional = true },
+      .desc = "intercept the e-ink page-turn update and sweep it", .optional = true },
     { .sym = "_ZN11ReadingView17nextPageWithTimerEv", .sym_new = "_nds_nextPageWithTimer",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_nextPageWithTimer),
-      .desc = "mark forward page turn", .optional = true },
+      .desc = "arm sweep, forward", .optional = true },
     { .sym = "_ZN11ReadingView17prevPageWithTimerEv", .sym_new = "_nds_prevPageWithTimer",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_prevPageWithTimer),
-      .desc = "mark backward page turn", .optional = true },
+      .desc = "arm sweep, backward", .optional = true },
     {0},
 };
 
