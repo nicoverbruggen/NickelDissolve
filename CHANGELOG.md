@@ -5,29 +5,38 @@ file: each `## vX.Y` heading must exactly match a git tag.
 
 ## Unreleased
 
-### Added
-
-- Continuous integration: build, firmware-symbol check, and CHANGELOG-driven release workflows.
-- Firmware symbol verification (`test/syms`) against real firmware dumps, with `//libnickel`
-  annotations on the hooked `ReadingView` page-turn symbols.
-- The running mod version and firmware version are now logged in the startup block (and the mod
-  version prefixes every log line).
-
-### Changed
-
-- Standardized logging: the on-device log is now `nickel-dissolve.log`, is capped in size
-  (rotates to `.log.old`), and timestamps are thread-safe.
-- Page-turn / ioctl tracing is now tied to the mode: a supported device running the animation
-  (`nds_mode:sweep`) stays quiet. Use `nds_mode:observe` or `nds_log:1` to trace. The old
-  `nds_debug_log_ioctl` key (which logged by default) is replaced by `nds_log`.
-- A malformed config now turns on verbose logging for that boot so it diagnoses itself.
-
 ## v0.1
 
+A Kindle-style directional page-turn animation for Kobo: the new page sweeps in as a band-wipe
+across the screen instead of a single flat refresh. It works entirely through the e-ink screen's
+public update interface, with no driver patching.
+
 ### Added
 
-- Initial release: Kindle-style directional page-turn band-wipe for Kobo, driven entirely
-  through the public e-ink update ioctl. Works on hwtcon (MediaTek), mxcfb (i.MX), and sunxi
-  (AllWinner) devices; colour (Kaleido) pages are detected and refresh normally.
-- Per-gesture control (`nds_animate_on_swipe` / `_tap` / `_button`) and per-device tuned
-  defaults. Verified on the Kobo Libra Colour, including colour-page handling.
+- Page-turn animation for every way of turning a page: swipes, taps, and the physical
+  page-turn buttons. Backward turns sweep the other way, and a tap sweeps toward the side you
+  tapped.
+- Per-gesture control (`nds_animate_on_swipe`, `nds_animate_on_tap`, `nds_animate_on_button`)
+  and tuning options for the number of bands (`nds_strips`), speed (`nds_delay_us`), and
+  direction (`nds_direction`), with sensible defaults tuned per device. `nds_mode` chooses
+  `sweep` (default), `observe`, or `off`.
+- Automatic colour-page handling on Kaleido colour panels: pages with colour content refresh
+  normally instead of animating, so colours are never distorted.
+
+### Device support
+
+- **Verified on hardware:** Kobo Libra Colour (including colour-page handling).
+- **Expected to work (not yet hardware-verified):** Kobo Clara Colour, Clara BW, Libra 2,
+  Clara 2E, Elipsa 2E.
+- **Works but off by default** (the wipe is slow on the large panels): Kobo Elipsa and Sage.
+  Opt in with `nds_mode:sweep`.
+- **Any other device:** the mod stays inactive, with no animation and no risk.
+
+### Safety
+
+- Only a black-and-white reading page-turn is ever animated; menus, the home screen, and colour
+  content pass through untouched.
+- If a sweep ever fails, the normal page refresh is shown instead. A bad frame is fixed by the
+  next refresh, never a brick. On an unrecognised device or firmware the mod simply stays
+  inactive.
+- Reversible: delete the `uninstall` file and reboot to remove it cleanly.

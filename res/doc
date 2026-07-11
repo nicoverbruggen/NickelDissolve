@@ -8,12 +8,12 @@ have. This mod approximates it from userspace: it intercepts the one full-screen
 Nickel issues per page turn and replaces it with a sequence of partial updates over vertical
 strips, swept across the screen. Each strip transitions from the old page to the new one, so the
 sweep reads as a directional wipe. It's a stepped wipe (the driver serialises rapid partials),
-not the perfectly smooth hardware swipe — but with greyscale strips it reads well.
+not the perfectly smooth hardware swipe, but with greyscale strips it reads well.
 
 ## Setup
 
 Nothing to set up: the animation is ON after installing and rebooting, for every way of turning
-a page — swipes, taps, and the page-turn buttons. Each gesture can be turned off individually
+a page: swipes, taps, and the page-turn buttons. Each gesture can be turned off individually
 (see below).
 
 Elipsa and Sage are the one exception: the wipe is slow on those large panels, so on them the
@@ -22,21 +22,21 @@ mod stays passive unless you explicitly create a config with `nds_mode:sweep`.
 ## Configuration (optional)
 
 There is NO config file by default and none is needed. To change a setting, create a plain-text
-file named `config` in this folder with one `key:value` per line — only the keys you want to
+file named `config` in this folder with one `key:value` per line, only the keys you want to
 override. Delete the file to go back to the defaults. Changes take effect on reboot.
 
 | key | default | meaning |
 |---|---|---|
 | `nds_mode` | `sweep` | `sweep` = animate page turns; `observe` = don't animate, just log; `off` = do nothing at all |
 | `nds_strips` | `8` | number of vertical bands (2–32); more = smoother but slower |
-| `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000) — the speed dial; raise to slow the wipe down |
+| `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000); the speed dial, raise to slow the wipe down |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); backward turns flip automatically |
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |
 | `nds_animate_on_tap` | `1` | `0` = tap turns change instantly instead of animating |
 | `nds_animate_on_button` | `1` | `0` = page-turn button presses change instantly instead of animating |
 | `nds_log` | `0` | `1` = write verbose page-turn traces to the log (for troubleshooting) |
 
-Example — slow the wipe down and make taps turn instantly (classic Kindle-like split):
+Example (slow the wipe down and make taps turn instantly, a classic Kindle-like split):
 
     nds_delay_us:30000
     nds_animate_on_tap:0
@@ -47,19 +47,19 @@ ABOUT.md (https://github.com/nicoverbruggen/NickelDissolve) and are not meant fo
 ## Log
 
 The mod writes to `nickel-dissolve.log` in this folder. On a working device running the
-animation it stays quiet — just a short startup block naming the mod version, your firmware
+animation it stays quiet, just a short startup block naming the mod version, your firmware
 version, and the resolved settings. For troubleshooting, set `nds_log:1` (or `nds_mode:observe`
 to log without animating) and reboot; the file is capped in size and rotates to
 `nickel-dissolve.log.old`.
 
 ## Safety
 
-- Only a black-and-white reading page-turn is ever animated. Menus, the home screen, and — on
-  colour devices — pages with colour content are detected and left to refresh normally, so the
+- Only a black-and-white reading page-turn is ever animated. Menus, the home screen, and (on
+  colour devices) pages with colour content are detected and left to refresh normally, so the
   animation never distorts colour.
-- `nds_mode:observe` changes nothing on screen — it forwards every ioctl untouched and just logs.
+- `nds_mode:observe` changes nothing on screen; it forwards every ioctl untouched and just logs.
 - No hang: the last strip reuses Nickel's update marker, with a fallback to the original update.
-- The hook is `optional` — a firmware/platform mismatch makes the mod inert, not a brick.
+- The hook is `optional`; a firmware/platform mismatch makes the mod inert, not a brick.
 - Backward (previous-page) turns automatically sweep the opposite direction.
 
 Set `nds_mode:off` to disable, or delete the `uninstall` file in this folder and reboot to

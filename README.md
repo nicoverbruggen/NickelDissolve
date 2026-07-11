@@ -1,12 +1,14 @@
 # NickelDissolve
 
 > [!WARNING]
-> **Early release (v0.1) — experimental.** Verified on the Kobo Libra Colour so far (including colour-page handling); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device — see [Is it safe?](#is-it-safe) — but there are no guarantees.
+> **Early, experimental release (v0.1).** Verified on the Kobo Libra Colour so far (including colour-page handling); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
 
 > [!NOTE]
-> **Testers wanted!** I'd love confirmation on other Kobo models — especially the Clara Colour, Clara BW, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
+> **Testers wanted!** I'd love confirmation on other Kobo models, especially the Clara Colour, Clara BW, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
 
 NickelDissolve gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
+
+See it in action: **[short demo video](https://www.youtube.com/shorts/viUPrkyF2Yg)**.
 
 ## What it does
 
@@ -14,9 +16,9 @@ If you've seen a recent Kindle turn a page, you know the effect: the new page gl
 
 Out of the box:
 
-- **Every way of turning a page animates** — swipes, taps, and the physical page-turn buttons. Backward turns sweep the other way, and a tap even sweeps toward the side you tapped.
+- **Every way of turning a page animates:** swipes, taps, and the physical page-turn buttons. Backward turns sweep the other way, and a tap even sweeps toward the side you tapped.
 - Each gesture can be turned off individually if you prefer, say, instant taps with animated swipes.
-- Everything else — menus, the home screen, images — is completely untouched.
+- Everything else (menus, the home screen, images) is completely untouched.
 
 It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E Ink screens accept updates), but with the default settings it looks pretty good!
 
@@ -30,7 +32,7 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 | Kobo Libra 2 | ✅ Should work (not yet verified) |
 | Kobo Clara 2E | ✅ Should work (not yet verified) |
 | Kobo Elipsa 2E | ✅ Should work (not yet verified) |
-| Kobo Elipsa / Sage | ⚠️ Works, but too slow to recommend — off unless you opt in |
+| Kobo Elipsa / Sage | ⚠️ Works, but too slow to recommend; off unless you opt in |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
 On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.
@@ -39,7 +41,7 @@ On colour devices (Kaleido screens), pages with **colour content** are detected 
 
 1. Download `KoboRoot.tgz` and copy it into the hidden `.kobo` folder on your Kobo.
 2. Safely eject; the device reboots and installs the mod.
-3. That's it — swipe to turn a page and it wipes in. No setup needed.
+3. That's it. Swipe to turn a page and it wipes in. No setup needed.
 
 ## Removing or turning it off
 
@@ -48,7 +50,7 @@ On colour devices (Kaleido screens), pages with **colour content** are detected 
 
 ## Customizing
 
-You don't need a configuration file — the defaults are tuned per device. If you want to tweak, create a plain-text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` with one setting per line. A few popular ones:
+You don't need a configuration file; the defaults are tuned per device. If you want to tweak, create a plain-text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` with one setting per line. A few popular ones:
 
 ```
 nds_delay_us:30000      # slow the animation down
@@ -66,19 +68,19 @@ If something doesn't look right, the mod keeps a small log file that makes it mu
 KOBOeReader/.adds/nickel-dissolve/nickel-dissolve.log
 ```
 
-Attach that file when you report an issue — it records which version of the mod you're running and your Kobo's firmware, and it normally stays short. If you're asked for more detail, open the `config` file in the same folder, add the line `nds_log:1`, reboot, and try again — that captures a full page-turn trace in the log.
+Attach that file when you report an issue. It records which version of the mod you're running and your Kobo's firmware, and it normally stays short. If you're asked for more detail, open the `config` file in the same folder, add the line `nds_log:1`, reboot, and try again. That captures a full page-turn trace in the log.
 
 ## Is it safe?
 
 - Only the page-turn refresh is ever touched; everything else on screen works exactly as before.
 - The mod can't get stuck holding your screen: if anything about the animation fails, the normal page refresh is shown instead.
-- If a page ever looks garbled, the next refresh fixes it — nothing is permanent.
+- If a page ever looks garbled, the next refresh fixes it. Nothing is permanent.
 - On unknown devices or after a firmware change it doesn't recognise, the mod simply goes inactive rather than guessing.
 - It removes itself cleanly (see above), leaving your Kobo exactly as it was.
 
 ## Technical details
 
-Curious how it works, what every configuration value (including the `nds_debug_*` settings) does, or why each device gets different defaults? See **[ABOUT.md](ABOUT.md)** — the technical companion to this README. To build it yourself or contribute, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
+Curious how it works, what every configuration value (including the `nds_debug_*` settings) does, or why each device gets different defaults? See **[ABOUT.md](ABOUT.md)**, the technical companion to this README. To build it yourself or contribute, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## Credits
 
