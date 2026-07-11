@@ -84,6 +84,9 @@ struct nds_platform {
                                // submission-wait, so it needs an explicit delay or the wipe is instant
     uint32_t      dith_off;    // byte offset of dither_mode in the update struct (0 = don't log it):
                                // hwtcon_update_data has int dither_mode right after flags (@0x20)
+    uint32_t      read_wf;     // the flashless greyscale reading waveform for this platform, used
+                               // when converting a forced-GC16 first-turn refresh into an animated
+                               // sweep (hwtcon: GLR16=4; mxcfb: REAGL=6)
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
@@ -91,11 +94,11 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32 },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
     // No submission-wait to pace strips, so default to ~20 ms/strip or the wipe is near-instant.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  20000, 0  },
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  20000, 0,  6 },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -120,6 +123,16 @@ extern "C" { bool nds_verbose_enabled = false; }
 static int  nds_turn_dir = 0;                 // 0 = forward (next), 1 = backward (prev)
 static volatile int  nds_turn_pending = 0;    // a page turn just fired; sweep its next full update
 static volatile long nds_turn_ts = 0;         // time() when the turn fired (staleness guard)
+// Book-open / chapter-jump detection: Kobo draws these as a full-screen flash immediately
+// followed by a full-screen content render, both from the SAME input gesture. A page turn is a
+// single render from its own gesture. So we remember the gesture that produced the last full-screen
+// flash; if the next full-screen content render is from that same gesture (within a short window),
+// it's the settle after an open/jump and must not animate. A separate later turn has a new gesture
+// and animates normally (this is why turn-1's own GC16 flash doesn't suppress turn-2).
+static volatile long nds_flash_seq = -1;      // nds_gesture_seq() at the last full-screen flash (-1 = none pending)
+static volatile long nds_flash_ts  = 0;       // time() of that flash (staleness bound)
+#define NDS_SETTLE_WINDOW_S 2
+static volatile int  nds_first_turn_pending = 0;  // set when a book-open settle fires; the next turn is the first turn, whose forced GC16 we animate instead of flashing
 static uint32_t nds_ephemeral_marker = 0xF0000000u;   // markers for non-final strips (never collide with Nickel)
 static const struct nds_platform *nds_active = nullptr;   // detected from the first update ioctl (for logging)
 
@@ -170,6 +183,11 @@ static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_ski
 // home, covers, reading), so the panel's colour pass is skipped everywhere. A debugging /
 // full-B&W-mode switch, independent of the animation. No-op on mono/i.MX. See nds_force_bw use.
 static bool nds_force_bw()    { return nds_global_config_bool("nds_debug_force_bw", false); }
+// Animate the first page turn after opening a book. Kobo renders that turn as a forced GC16 full
+// flash (it can't be talked out of it via settings); when this is on we rewrite it to the
+// platform's flashless reading waveform and sweep it, so the first turn animates like the rest.
+// The book already did a full clear on open, so skipping this one costs little. On by default.
+static bool nds_animate_first_turn() { return nds_global_config_bool("nds_animate_first_turn", true); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
@@ -364,19 +382,77 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             // update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
             uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
             bool is_flash = (wf == WF_GC16) || (plat->flash_full && md == UPD_FULL);
+            // Book-open / chapter-jump settle (see nds_flash_seq): a full-screen flash records the
+            // gesture that caused it; the next full-screen content render from that SAME gesture is
+            // the open/jump settle and must not animate. A later turn (new gesture) animates, so
+            // turn-1's own GC16 flash does not suppress turn-2. Only unarmed flashes arm this — an
+            // armed (swipe/button) ghost-clear is a real turn, not an open.
+            long gseq = nds_gesture_seq();
+            bool settle = false;
+            if (is_flash) {
+                if (!armed) { nds_flash_seq = gseq; nds_flash_ts = nds_now(); }
+            } else {
+                settle = (nds_flash_seq >= 0 && gseq == nds_flash_seq && (nds_now() - nds_flash_ts) <= NDS_SETTLE_WINDOW_S);
+                nds_flash_seq = -1;   // consume: only the first full render after a flash can settle
+            }
+            // First turn after a book open: Kobo forces GC16 on it. nds_first_turn_pending was armed
+            // by the open settle; if this is that turn's GC16, animate it as a Regal sweep instead.
+            // REQUIRE armed: converting bypasses the waveform gate (which normally keeps home/menus
+            // from sweeping), so we only do it for a genuine forward/back turn (the *PageWithTimer
+            // hook fired). Home, menu, and opening another book never arm, so they can't be mistaken
+            // for the first turn even while the flag is still pending. (Tap first-turns are unarmed
+            // and indistinguishable from a menu/home tap here, so they keep Kobo's flash.)
+            bool convert_first_turn = nds_first_turn_pending && armed && is_flash && wf == WF_GC16 && nds_animate_first_turn();
             // Sweep only a genuine B&W reading turn whose gesture is enabled. The waveform gate is
             // the colour guard AND the reader-context guard in one: colour pages get a colour
             // waveform, flashes/menus/home get GC16/A2/AUTO — none are GL16/GLR16, so none sweep.
             if (!nds_gesture_animate(armed, w)) {
-                // Gesture disabled, or the render wasn't caused by a fresh tap — pass through.
+                nds_first_turn_pending = 0;
+                // Gesture disabled, or the render wasn't caused by a fresh tap: pass through.
+                // Log why (verbose), so a "tap didn't animate" report is diagnosable from a log:
+                // armed=0 gesture=NONE means the filter never classified the tap (the turn likely
+                // fired before the touch release); gesture=SWIPE means it was mis-thresholded.
+                if (nds_verbose_enabled) {
+                    static int n = 0;
+                    if (n < 40) { n++;
+                        long gts = 0; int tx = -1;
+                        enum nds_gesture g = nds_gesture_last(&gts, &tx);
+                        NDS_LOG("no-anim [%s] %ux%u armed=%d gesture=%s age=%lds tap_x=%d filter=%d animate_tap=%d -> passthrough",
+                                plat->name, w, h, armed, nds_gesture_name(g), nds_now() - gts, tx,
+                                nds_gesture_filter_installed(), nds_animate_tap());
+                    }
+                }
+            } else if (convert_first_turn) {
+                nds_first_turn_pending = 0;
+                uint8_t conv[128];
+                if (plat->size <= sizeof(conv)) {
+                    memcpy(conv, u, plat->size);
+                    wr32(conv, OFF_WAVEFORM, plat->read_wf);   // GC16 flash -> flashless Regal
+                    bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                    if (nds_verbose_enabled)
+                        NDS_LOG("FIRST-TURN [%s] %ux%u: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
+                                plat->name, w, h, plat->read_wf, nds_wf_name(plat->read_wf), rtl ? "R->L" : "L->R");
+                    nds_do_sweep(fd, plat, conv);
+                    return 0;
+                }
+                // update larger than our buffer: leave it as the original GC16 flash (passthrough)
             } else if (is_flash || !nds_wf_sweepable(plat, wf)) {
+                nds_first_turn_pending = 0;
                 static int cskip = 0;
                 if (nds_verbose_enabled && cskip < 40 && !is_flash) { cskip++;
                     NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
                             plat->name, w, h, wf, nds_wf_name(wf), md == UPD_FULL ? "FULL" : "PARTIAL",
                             nds_dither(u, plat), rd32(u, plat->flags_off));
                 }
+            } else if (settle) {
+                nds_first_turn_pending = 1;   // the next full-screen turn is the first turn after the open
+                static int nset = 0;
+                if (nds_verbose_enabled && nset < 40) { nset++;
+                    NDS_LOG("SETTLE [%s] %ux%u wf=%u(%s) -> render right after a full-screen flash (book open / chapter / ghost-clear), not animated",
+                            plat->name, w, h, wf, nds_wf_name(wf));
+                }
             } else {
+                nds_first_turn_pending = 0;
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
                 if (nds_verbose_enabled && swept < 40) { swept++;

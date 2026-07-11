@@ -5,6 +5,25 @@ file: each `## vX.Y` heading must exactly match a git tag.
 
 ## Unreleased
 
+## v0.2
+
+Reliability and polish for the page-turn animation, confirmed on the Kobo Clara BW and Kobo
+Libra Colour.
+
+### Fixed
+
+- **Tap page turns now animate.** Taps were misclassified as swipes because the gesture filter
+  read widget-local touch coordinates; it now uses screen coordinates, so a tap is recognised as
+  a tap and its turn animates (and sweeps toward the side you tapped).
+
+### Changed
+
+- **Opening a book is now a clean full refresh, and the first page turn animates.** Kobo forces
+  a full flash on the first turn after opening; the mod now renders that turn as a normal
+  animated sweep instead. Set `nds_animate_first_turn:0` to keep Kobo's flash on the first turn.
+- The render that immediately follows a book open or chapter jump is no longer mistaken for a
+  page turn, so opening a book no longer briefly animates its first page.
+
 ## v0.1
 
 A Kindle-style directional page-turn animation for Kobo: the new page sweeps in as a band-wipe

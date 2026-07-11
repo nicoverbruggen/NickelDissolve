@@ -39,10 +39,21 @@ namespace {
 volatile int  g_last  = NDS_GESTURE_NONE;
 volatile long g_ts    = 0;
 volatile int  g_tap_x = -1;
+volatile long g_seq   = 0;   // bumped once per finished gesture
 
 // Press-position bookkeeping (UI thread only).
 int  g_press_x = 0, g_press_y = 0;
 bool g_installed = false;
+
+// note_press logs that a press was observed (rate-limited, verbose only). Logging press and
+// finish separately tells apart "the filter never sees the tap" from "the turn fires before the
+// release" (press logged, no matching classification) and a mis-thresholded swipe.
+void note_press(const char *via) {
+    if (!nds_verbose_enabled)
+        return;
+    static int n = 0;
+    if (n < 80) { n++; NDS_LOG("gesture: press via %s at (%d,%d)", via, g_press_x, g_press_y); }
+}
 
 void finish_gesture(int x, int y) {
     const int dx = x - g_press_x, dy = y - g_press_y;
@@ -50,35 +61,51 @@ void finish_gesture(int x, int y) {
     g_tap_x = swipe ? -1 : x;
     g_last  = swipe ? NDS_GESTURE_SWIPE : NDS_GESTURE_TAP;
     g_ts    = (long)time(nullptr);
+    g_seq++;
+    if (nds_verbose_enabled) {
+        static int n = 0;
+        if (n < 80) { n++;
+            NDS_LOG("gesture: classified %s press=(%d,%d) release=(%d,%d) dist2=%d thr2=%d",
+                    swipe ? "SWIPE" : "TAP", g_press_x, g_press_y, x, y,
+                    dx * dx + dy * dy, NDS_SWIPE_DIST_PX * NDS_SWIPE_DIST_PX);
+        }
+    }
 }
 
 class NdsGestureFilter final : public QObject {
 public:
     bool eventFilter(QObject *obj, QEvent *ev) override {
         switch (ev->type()) {
+        // Coordinates are read in SCREEN space (globalX/screenPos), never widget-local (x()/pos()).
+        // The app-wide filter sees the same physical touch delivered to several nested widgets,
+        // each with a different local origin, so widget-local coords jump between the real point
+        // and a child widget's origin (a phantom "(25,0)" press) and corrupt the tap/swipe
+        // distance. Screen coordinates are identical across every widget the event passes through.
         case QEvent::MouseButtonPress:
         case QEvent::MouseButtonDblClick: {
             const QMouseEvent *me = static_cast<QMouseEvent *>(ev);
-            g_press_x = me->x(); g_press_y = me->y();
+            g_press_x = me->globalX(); g_press_y = me->globalY();
+            note_press("mouse");
             break;
         }
         case QEvent::MouseButtonRelease: {
             const QMouseEvent *me = static_cast<QMouseEvent *>(ev);
-            finish_gesture(me->x(), me->y());
+            finish_gesture(me->globalX(), me->globalY());
             break;
         }
         case QEvent::TouchBegin: {
             const QTouchEvent *te = static_cast<QTouchEvent *>(ev);
             if (!te->touchPoints().isEmpty()) {
-                const QPointF p = te->touchPoints().first().pos();
+                const QPointF p = te->touchPoints().first().screenPos();
                 g_press_x = (int)p.x(); g_press_y = (int)p.y();
             }
+            note_press("touch");
             break;
         }
         case QEvent::TouchEnd: {
             const QTouchEvent *te = static_cast<QTouchEvent *>(ev);
             if (!te->touchPoints().isEmpty()) {
-                const QPointF p = te->touchPoints().first().pos();
+                const QPointF p = te->touchPoints().first().screenPos();
                 finish_gesture((int)p.x(), (int)p.y());
             }
             break;
@@ -89,6 +116,7 @@ public:
             g_tap_x = -1;
             g_last  = NDS_GESTURE_BUTTON;
             g_ts    = (long)time(nullptr);
+            g_seq++;
             break;
         default:
             break;
@@ -117,4 +145,8 @@ enum nds_gesture nds_gesture_last(long *ts_out, int *tap_x_out) {
     if (ts_out) *ts_out = g_ts;
     if (tap_x_out) *tap_x_out = g_tap_x;
     return (enum nds_gesture)g_last;
+}
+
+long nds_gesture_seq(void) {
+    return g_seq;
 }
