@@ -1,7 +1,10 @@
 # NickelDissolve
 
 > [!WARNING]
-> **Work in progress — not ready for general use!** This is an experimental prototype under active development. Only a few devices are verified, colour-page handling is incomplete, and the configuration and behaviour may still change. Try it only if you know what you're doing and don't mind rough edges. (It's reversible and shouldn't brick your device — see [Is it safe?](#is-it-safe) — but there are no guarantees.)
+> **Early release (v0.1) — experimental.** Verified on the Kobo Libra Colour so far (including colour-page handling); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device — see [Is it safe?](#is-it-safe) — but there are no guarantees.
+
+> [!NOTE]
+> **Testers wanted!** I'd love confirmation on other Kobo models — especially the Clara Colour, Clara BW, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
 
 NickelDissolve gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
 
