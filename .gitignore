@@ -4,3 +4,6 @@
 src/*.so
 src/*.o
 .DS_Store
+
+# test harness build output
+test.syms

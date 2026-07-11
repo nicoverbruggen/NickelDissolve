@@ -10,6 +10,10 @@ extern "C" {
 #error "NDS_CONFIG_DIR not set (it should be done by the Makefile)"
 #endif
 
+// True once any config problem was seen (malformed line, legacy key, invalid value). nds_init
+// folds this into verbose logging so a broken config diagnoses itself in the log.
+bool nds_config_problem_seen(void);
+
 typedef struct nds_config_t nds_config_t;
 
 nds_config_t *nds_config_parse(void);

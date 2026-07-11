@@ -58,6 +58,16 @@ nds_animate_on_tap:0    # taps turn instantly; swipes and buttons still animate
 
 Changes apply on the next reboot; delete the file to go back to the defaults. The `doc` file in the same folder on your device explains every setting, and the full reference lives in [ABOUT.md](ABOUT.md).
 
+## Reporting a problem
+
+If something doesn't look right, the mod keeps a small log file that makes it much easier to help you. Connect your Kobo to a computer over USB and look for:
+
+```
+KOBOeReader/.adds/nickel-dissolve/nickel-dissolve.log
+```
+
+Attach that file when you report an issue — it records which version of the mod you're running and your Kobo's firmware, and it normally stays short. If you're asked for more detail, open the `config` file in the same folder, add the line `nds_log:1`, reboot, and try again — that captures a full page-turn trace in the log.
+
 ## Is it safe?
 
 - Only the page-turn refresh is ever touched; everything else on screen works exactly as before.
@@ -68,7 +78,7 @@ Changes apply on the next reboot; delete the file to go back to the defaults. Th
 
 ## Technical details
 
-Curious how it works, what every configuration value (including the `nds_debug_*` settings) does, why each device gets different defaults, or what's on the roadmap? See **[ABOUT.md](ABOUT.md)** — the technical companion to this README, including build instructions.
+Curious how it works, what every configuration value (including the `nds_debug_*` settings) does, or why each device gets different defaults? See **[ABOUT.md](ABOUT.md)** — the technical companion to this README. To build it yourself or contribute, see **[CONTRIBUTING.md](CONTRIBUTING.md)**.
 
 ## Credits
 

@@ -34,6 +34,7 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |
 | `nds_animate_on_tap` | `1` | `0` = tap turns change instantly instead of animating |
 | `nds_animate_on_button` | `1` | `0` = page-turn button presses change instantly instead of animating |
+| `nds_log` | `0` | `1` = write verbose page-turn traces to the log (for troubleshooting) |
 
 Example — slow the wipe down and make taps turn instantly (classic Kindle-like split):
 
@@ -42,6 +43,14 @@ Example — slow the wipe down and make taps turn instantly (classic Kindle-like
 
 There are also `nds_debug_*` keys for troubleshooting; they are documented in the project's
 ABOUT.md (https://github.com/nicoverbruggen/NickelDissolve) and are not meant for everyday use.
+
+## Log
+
+The mod writes to `nickel-dissolve.log` in this folder. On a working device running the
+animation it stays quiet — just a short startup block naming the mod version, your firmware
+version, and the resolved settings. For troubleshooting, set `nds_log:1` (or `nds_mode:observe`
+to log without animating) and reboot; the file is capped in size and rotates to
+`nickel-dissolve.log.old`.
 
 ## Safety
 

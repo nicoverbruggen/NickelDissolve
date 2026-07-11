@@ -114,6 +114,9 @@ static void (*real_nextPageWithTimer)(void *self) = nullptr;
 static void (*real_prevPageWithTimer)(void *self) = nullptr;
 
 static bool nds_safety_disabled = false;
+// Verbose tracing switch (declared in util.h, used by NDS_DBG + the hot-path traces). Published
+// once by nds_init after the config is parsed; false on a healthy "sweep"/"off" device.
+extern "C" { bool nds_verbose_enabled = false; }
 static int  nds_turn_dir = 0;                 // 0 = forward (next), 1 = backward (prev)
 static volatile int  nds_turn_pending = 0;    // a page turn just fired; sweep its next full update
 static volatile long nds_turn_ts = 0;         // time() when the turn fired (staleness guard)
@@ -135,7 +138,16 @@ static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 // sunxi (Elipsa/Sage) is functional but NOT recommended (huge panels, slow bands), so it never
 // sweeps by default: it requires nds_mode:sweep to be set explicitly in the config.
 static bool nds_sweep_explicit() { return nds_mode_is("sweep"); }
-static bool nds_log_ioctl()   { return nds_global_config_bool("nds_debug_log_ioctl", true); }
+// Whether verbose per-ioctl / per-turn tracing should be on for this boot. Tied to the MODE so a
+// supported device running the animation (sweep) stays quiet: "observe" exists to log the ioctl
+// stream, "off" logs nothing, and "sweep" traces only when the user opts in with nds_log:1 (or
+// the config had a problem, which force-enables it so mistakes self-diagnose). Computed once and
+// published to nds_verbose_enabled by nds_init.
+static bool nds_verbose_compute() {
+    if (nds_off()) return false;
+    if (nds_mode_is("observe")) return true;
+    return nds_global_config_bool("nds_log", false) || nds_config_problem_seen();
+}
 static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : 8; if (n < 2) n = 2; if (n > 32) n = 32; return n; }
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debug_wait"); return w && !strcasecmp(w, "complete"); }
@@ -359,7 +371,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 // Gesture disabled, or the render wasn't caused by a fresh tap — pass through.
             } else if (is_flash || !nds_wf_sweepable(plat, wf)) {
                 static int cskip = 0;
-                if (nds_log_ioctl() && cskip < 40 && !is_flash) { cskip++;
+                if (nds_verbose_enabled && cskip < 40 && !is_flash) { cskip++;
                     NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
                             plat->name, w, h, wf, nds_wf_name(wf), md == UPD_FULL ? "FULL" : "PARTIAL",
                             nds_dither(u, plat), rd32(u, plat->flags_off));
@@ -367,7 +379,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             } else {
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
-                if (nds_log_ioctl() && swept < 40) { swept++;
+                if (nds_verbose_enabled && swept < 40) { swept++;
                     NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
                             wf, nds_wf_name(wf), nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                             (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
@@ -398,7 +410,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 if (nds_gesture_animate(armed, w)) {
                     bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                     static int sswept = 0;
-                    if (nds_log_ioctl() && sswept < 40) { sswept++;
+                    if (nds_verbose_enabled && sswept < 40) { sswept++;
                         NDS_LOG("SWEEP [sunxi] %ux%u turn_mode=0x%x -> %d strips @ mode=0x%x %s", w, h, mode,
                                 nds_strips(), nds_sunxi_strip_mode(), rtl ? "R->L" : "L->R");
                     }
@@ -409,7 +421,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     }
 
     // observe: log the e-ink ioctl stream (first 160), passthrough unchanged
-    if (!nds_off() && !nds_safety_disabled && nds_log_ioctl() && NDS_IOC_MAGIC(request) == 0x46) {
+    if (!nds_off() && !nds_safety_disabled && nds_verbose_enabled && NDS_IOC_MAGIC(request) == 0x46) {
         static int logged = 0;
         if (logged < 160) { logged++;
             if (plat && argp) {
@@ -427,7 +439,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     }
 
     // observe (sunxi/AllWinner): log the DISP_EINK update stream (Elipsa/Sage). Passthrough unchanged.
-    if (!nds_off() && !nds_safety_disabled && nds_log_ioctl() &&
+    if (!nds_off() && !nds_safety_disabled && nds_verbose_enabled &&
             (request == NDS_DISP_EINK_UPDATE || request == NDS_DISP_EINK_UPDATE2 || request == NDS_DISP_EINK_WAIT)) {
         static int slog = 0;
         if (slog < 120) { slog++;
@@ -462,14 +474,14 @@ extern "C" __attribute__((visibility("default")))
 void _nds_nextPageWithTimer(void *self) {
     nds_gesture_filter_install();
     nds_turn_dir = 0; nds_turn_pending = 1; nds_turn_ts = nds_now();
-    static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: forward"); }
+    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: forward"); }
     if (real_nextPageWithTimer) real_nextPageWithTimer(self);
 }
 extern "C" __attribute__((visibility("default")))
 void _nds_prevPageWithTimer(void *self) {
     nds_gesture_filter_install();
     nds_turn_dir = 1; nds_turn_pending = 1; nds_turn_ts = nds_now();
-    static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: backward"); }
+    static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: backward"); }
     if (real_prevPageWithTimer) real_prevPageWithTimer(self);
 }
 
@@ -482,17 +494,23 @@ static int nds_init() {
         return 0;
     }
     const char *dcfg = nds_global_config_get("nds_delay_us");   // platform-dependent when unset
+    // Publish verbose tracing for the boot (observe mode / nds_log:1 / config problem) before the
+    // hooks can fire, so a broken config's SWEEP/SKIP/turn traces are on when they're needed.
+    nds_verbose_enabled = nds_verbose_compute();
+    // Startup block (always logged): mod version, firmware version, then the effective settings.
+    NDS_LOG("startup: NickelDissolve " NH_VERSION);
+    nds_log_firmware();
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
     bool gf = nds_gesture_filter_install();
-    NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d "
-            "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d force_bw=%d sweep_any_wf=%d log=%d",
+    NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d verbose=%d "
+            "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d force_bw=%d sweep_any_wf=%d",
             nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), nds_strips(),
             nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
-            nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf,
+            nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf, nds_verbose_enabled,
             nds_strip_wf(), nds_wait_complete() ? "complete" : "submission",
-            nds_cfa_skip(), nds_force_bw(), nds_global_config_bool("nds_debug_sweep_any_waveform", false), nds_log_ioctl());
+            nds_cfa_skip(), nds_force_bw(), nds_global_config_bool("nds_debug_sweep_any_waveform", false));
     return 0;
 }
 static bool nds_del(const char *p) { return access(p, F_OK) != 0 ? true : nh_delete_file(p); }
@@ -502,7 +520,8 @@ static bool nds_uninstall() {
     ok = nds_del(NDS_CONFIG_DIR "/doc") && ok;
     ok = nds_del(NDS_CONFIG_DIR "/default") && ok;
     ok = nds_del(NDS_CONFIG_DIR "/config") && ok;
-    ok = nds_del(NDS_CONFIG_DIR "/nickeldissolve.log") && ok;
+    ok = nds_del(NDS_CONFIG_DIR "/nickel-dissolve.log") && ok;
+    ok = nds_del(NDS_CONFIG_DIR "/nickel-dissolve.log.old") && ok;
     ok = nds_del(NDS_CONFIG_DIR "/disabled-by-safety") && ok;
     ok = nds_del(NDS_CONFIG_DIR "/uninstall") && ok;
     ok = nds_del(NDS_CONFIG_DIR "/uninstall-now") && ok;
@@ -522,9 +541,11 @@ static struct nh_hook NickelDissolveHooks[] = {
     { .sym = "ioctl", .sym_new = "_nds_ioctl",
       .lib = NDS_LIBKOBO, .out = nh_symoutptr(real_ioctl),
       .desc = "intercept the e-ink page-turn update and sweep it", .optional = true },
+    //libnickel 4.6.9960 * _ZN11ReadingView17nextPageWithTimerEv
     { .sym = "_ZN11ReadingView17nextPageWithTimerEv", .sym_new = "_nds_nextPageWithTimer",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_nextPageWithTimer),
       .desc = "arm sweep, forward", .optional = true },
+    //libnickel 4.6.9960 * _ZN11ReadingView17prevPageWithTimerEv
     { .sym = "_ZN11ReadingView17prevPageWithTimerEv", .sym_new = "_nds_prevPageWithTimer",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_prevPageWithTimer),
       .desc = "arm sweep, backward", .optional = true },

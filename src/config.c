@@ -20,6 +20,14 @@ struct nds_config_t {
     nds_config_entry_t *tail;
 };
 
+// Set on any config problem (malformed line, legacy key, invalid value). nds_init folds this into
+// nds_verbose_enabled, so a broken config turns on verbose logging for the boot and diagnoses
+// itself in the log the user attaches.
+static bool nds_config_problem = false;
+bool nds_config_problem_seen(void) {
+    return nds_config_problem;
+}
+
 static void nds_config_append(nds_config_t *cfg, const char *key, const char *val) {
     nds_config_entry_t *e = (nds_config_entry_t*)calloc(1, sizeof(nds_config_entry_t));
     if (!e || !(e->key = strdup(key)) || !(e->val = strdup(val))) {
@@ -39,28 +47,9 @@ static void nds_config_append(nds_config_t *cfg, const char *key, const char *va
     cfg->tail = e;
 }
 
-// Keys removed or renamed by the config rework (user keys vs nds_debug_* keys). Warn and ignore
-// them so an old config file changes nothing silently — the log says what to rename.
-static const struct { const char *key; const char *hint; } nds_legacy_keys[] = {
-    { "nds_enabled",        "folded into nds_mode (off|observe|sweep)" },
-    { "nds_strip_waveform", "renamed to nds_debug_strip_waveform" },
-    { "nds_wait",           "renamed to nds_debug_wait" },
-    { "nds_cfa_skip",       "renamed to nds_debug_cfa_skip" },
-    { "nds_color_skip",     "renamed to nds_debug_color_skip" },
-    { "nds_log_ioctl",      "renamed to nds_debug_log_ioctl" },
-    { "nds_tap_animates",   "replaced by nds_animate_on_tap (with nds_animate_on_swipe / nds_animate_on_button)" },
-    { "nds_debug_color_skip", "removed — colour pages are now skipped by waveform, not the CFA flag field" },
-};
-
-static const char *nds_legacy_hint(const char *key) {
-    for (size_t i = 0; i < sizeof(nds_legacy_keys) / sizeof(nds_legacy_keys[0]); i++)
-        if (!strcmp(key, nds_legacy_keys[i].key))
-            return nds_legacy_keys[i].hint;
-    return NULL;
-}
-
 // The config file is OPTIONAL and none is shipped: no file means the built-in defaults. A file
-// only needs the keys being overridden; delete it to go back to the defaults.
+// only needs the keys being overridden; delete it to go back to the defaults. Unknown keys are
+// accepted and simply do nothing.
 nds_config_t *nds_config_parse(void) {
     nds_config_t *cfg = (nds_config_t*)calloc(1, sizeof(nds_config_t));
     if (!cfg)
@@ -95,27 +84,29 @@ nds_config_t *nds_config_parse(void) {
         char *key = strsep(&cur, ":");
         key = strtrim(key);
         if (!key || !*key) {
+            nds_config_problem = true;
             NDS_LOG("warning: %s/config: line %d: expected key, ignoring line", NDS_CONFIG_DIR_DISP, lineno);
             continue;
         }
         if (!cur) {
+            nds_config_problem = true;
             NDS_LOG("warning: %s/config: line %d: expected ':' after key '%s', ignoring line", NDS_CONFIG_DIR_DISP, lineno, key);
-            continue;
-        }
-
-        const char *hint = nds_legacy_hint(key);
-        if (hint) {
-            NDS_LOG("warning: %s/config: line %d: legacy key '%s' (%s); ignoring", NDS_CONFIG_DIR_DISP, lineno, key, hint);
             continue;
         }
 
         char *val = strtrim(cur);
         nds_config_append(cfg, key, val);
-        NDS_LOG("config: %s = %s", key, val);
     }
 
     free(buf);
     fclose(f);
+
+    // Quiet when healthy: echo the parsed keys only when the config had a problem, so a broken
+    // config shows what was actually read in the log the user attaches. The startup block logs
+    // the effective (resolved + defaulted) settings regardless.
+    if (nds_config_problem)
+        for (nds_config_entry_t *e = cfg->head; e; e = e->next)
+            NDS_LOG("config: %s = %s", e->key, e->val);
     return cfg;
 }
 
@@ -137,6 +128,7 @@ bool nds_config_bool(nds_config_t *cfg, const char *key, bool default_value) {
     if (!strcmp(val, "0") || !strcasecmp(val, "false") || !strcasecmp(val, "no") || !strcasecmp(val, "off"))
         return false;
 
+    nds_config_problem = true;
     NDS_LOG("warning: invalid boolean for '%s': '%s'; using default %d", key, val, default_value ? 1 : 0);
     return default_value;
 }
@@ -153,6 +145,7 @@ double nds_config_double(nds_config_t *cfg, const char *key, double default_valu
     for (const char *p = end; p && *p; p++)
         if (!isspace((unsigned char)*p)) { trailing = true; break; }
     if (errno || end == val || trailing) {
+        nds_config_problem = true;
         NDS_LOG("warning: invalid number for '%s': '%s'; using default %.4f", key, val, default_value);
         return default_value;
     }

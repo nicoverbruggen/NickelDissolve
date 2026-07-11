@@ -1,0 +1,79 @@
+name: Bug report
+description: Report a problem with NickelDissolve
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. The log file is required — the mod logs
+        its version, your firmware version, your config, and which hooks attached, which is
+        usually most of the diagnosis. A page-turn log helps a lot.
+
+  - type: input
+    id: device
+    attributes:
+      label: Kobo device
+      description: The exact model.
+      placeholder: e.g. Kobo Libra Colour
+    validations:
+      required: true
+
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware version
+      description: "Settings > Device information > Software version."
+      placeholder: e.g. 4.45.23697
+    validations:
+      required: true
+
+  - type: input
+    id: modversion
+    attributes:
+      label: NickelDissolve version
+      description: The release you installed (or the commit if you built it yourself).
+      placeholder: e.g. v0.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you expect, and what happened instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+
+  - type: textarea
+    id: log
+    attributes:
+      label: Log file
+      description: >
+        Connect the Kobo over USB and attach
+        `KOBOeReader/.adds/nickel-dissolve/nickel-dissolve.log` (drag & drop it here, or paste
+        its contents). For a page-turn issue, set `nds_log:1` in
+        `KOBOeReader/.adds/nickel-dissolve/config` (or use `nds_mode:observe`), reboot,
+        reproduce, and attach the log from that boot.
+      render: text
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I rebooted the device after installing / changing the config.
+          required: true
+        - label: "`nds_mode` is not set to `off` in my config."
+          required: true

@@ -1,0 +1,32 @@
+name: Build
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: NickelDissolve
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/pgaskin/nickeltc:1.0
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0        # full history so `git describe` can stamp the version
+          submodules: true
+
+      - name: Build
+        run: make clean all strip koboroot
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v6
+        with:
+          name: NickelDissolve
+          path: |
+            KoboRoot.tgz
+            src/libnickeldissolve.so
