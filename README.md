@@ -58,18 +58,20 @@ Set **`nds_tap_animates:1`** to animate taps too. Caveat, because taps can't be 
 
 ## Device support
 
-The following devices are supported:
+Target coverage is **Elipsa and newer**. *Supported* = the mod drives this platform; *Tested by author* = personally run on the hardware (untested devices share an interface with a tested one, so they should work, but haven't been verified).
 
-| Device | SoC / interface | Status |
-|---|---|---|
-| **Clara BW** (Spa BW) | MTK / hwtcon (mono) | ✅ **Tested** — flawless |
-| **Clara Colour** (Spa Colour) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
-| **Libra Colour** (Monza) | MTK / hwtcon (Kaleido) | ✅ **Tested** (`nds_cfa_skip`, default on) |
-| **Elipsa 2E** (Condor) | MTK / hwtcon (mono) | 🟡 Same interface — ready, **untested** |
-| **Libra 2** (Io) | i.MX / mxcfb (mx6sll) | 🟡 In the platform table — ready, **untested** |
-| **Clara 2E** (Goldfinch) | i.MX / mxcfb | 🟡 In the platform table — ready, **untested** |
-| **Elipsa** (Europa) | **AllWinner / sunxi** (B300) | ⚠️ **Works — not recommended** (large panel makes the wipe slow) |
-| **Sage** (Cadmus) | **AllWinner / sunxi** (B300) | ⚠️ **Works** (same sunxi path) **— not recommended** (large panel); untested |
+| Device | Chipset | Platform | Supported | Tested by author |
+|---|---|---|---|---|
+| **Clara BW** | MediaTek MT8113T | hwtcon (mono) | ✅ Yes | ✅ Yes |
+| **Clara Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Yes | ✅ Yes |
+| **Libra Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Yes | ✅ Yes |
+| **Elipsa 2E** | MediaTek MT8113T | hwtcon (mono) | ✅ Yes | ❌ No |
+| **Libra 2** | NXP i.MX6SLL | mxcfb | ✅ Yes | ❌ No |
+| **Clara 2E** | NXP i.MX6SLL | mxcfb | ✅ Yes | ❌ No |
+| **Elipsa** | AllWinner B300 | sunxi | ⚠️ Not recommended | ✅ Yes |
+| **Sage** | AllWinner B300 | sunxi | ⚠️ Not recommended | ❌ No |
+
+**Any device not listed above is unsupported by default.** On an unrecognised platform the mod simply stays inert (no animation, no risk) — it won't sweep unless the device is on one of the interfaces above.
 
 The sunxi devices (Elipsa, Sage) use a **different update interface** (`DISP_EINK_UPDATE2`, a pointer-based `ubuffer`, generic frame-sync wait) that doesn't fit the flat offset table, so they get a dedicated code path. It works — a real directional wipe, confirmed on an Elipsa — but these are big panels, and each e-ink band renders slowly on them, so the sweep is more of a deliberate wipe than a quick one. It's fully functional, just **not recommended** at these display sizes; enable `sweep` if you want it anyway. Inert (`observe`) by default.
 
