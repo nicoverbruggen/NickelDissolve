@@ -45,9 +45,9 @@ ABOUT.md (https://github.com/nicoverbruggen/NickelDissolve) and are not meant fo
 
 ## Safety
 
-- Only the full-screen page-turn update is ever touched; all other updates (menus, UI, images)
-  pass through unchanged. On Kaleido colour devices, pages with colour content may look slightly
-  off during the animation for now; the next refresh always shows them correctly.
+- Only a black-and-white reading page-turn is ever animated. Menus, the home screen, and — on
+  colour devices — pages with colour content are detected and left to refresh normally, so the
+  animation never distorts colour.
 - `nds_mode:observe` changes nothing on screen — it forwards every ioctl untouched and just logs.
 - No hang: the last strip reuses Nickel's update marker, with a fallback to the original update.
 - The hook is `optional` — a firmware/platform mismatch makes the mod inert, not a brick.

@@ -82,6 +82,8 @@ struct nds_platform {
     uint32_t      def_delay_us;// per-platform default inter-strip delay when nds_delay_us is unset:
                                // hwtcon paces itself via the submission-wait (0); mxcfb has no
                                // submission-wait, so it needs an explicit delay or the wipe is instant
+    uint32_t      dith_off;    // byte offset of dither_mode in the update struct (0 = don't log it):
+                               // hwtcon_update_data has int dither_mode right after flags (@0x20)
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
@@ -89,11 +91,11 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0     },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
     // No submission-wait to pace strips, so default to ~20 ms/strip or the wipe is near-instant.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  20000 },
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  20000, 0  },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -149,19 +151,49 @@ static bool nds_animate_swipe()  { return nds_global_config_bool("nds_animate_on
 static bool nds_animate_tap()    { return nds_global_config_bool("nds_animate_on_tap", true); }
 static bool nds_animate_button() { return nds_global_config_bool("nds_animate_on_button", true); }
 // Set HWTCON_FLAG_CFA_SKIP on the strips (Kaleido): skips the per-region CFA colour pass whose
-// region boundaries produce the seams. Correct for B&W content (no colour to convert) — and with
-// nds_debug_color_skip on (the default), B&W content is the only thing that ever gets swept.
+// region boundaries produce the seams. Correct for B&W content (no colour to convert) — and we
+// only ever sweep B&W reading turns (see nds_wf_sweepable), so this is exactly right.
 static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_skip", true); }
-// Kaleido: skip the sweep on COLOUR pages so they full-refresh normally (the whole-frame CFA
-// colour conversion can't be chopped into strips). DEFAULT OFF for now: on-device logs (Libra
-// Colour, fw 4.45.23697) show Nickel tags EVERY reader update with a CFA colour mode — G2,
-// flags=0x600, B&W text turns included — so a non-zero CFA field alone cannot identify colour
-// pages, and skipping on it suppresses the animation entirely. Narrowing the detection (via the
-// waveform id or the AIE image modes) is on the roadmap; set 1 to re-enable the broad skip.
-static bool nds_color_skip()  { return nds_global_config_bool("nds_debug_color_skip", false); }
+// Force the WHOLE device to greyscale: OR HWTCON_FLAG_CFA_SKIP into every hwtcon update (menus,
+// home, covers, reading), so the panel's colour pass is skipped everywhere. A debugging /
+// full-B&W-mode switch, independent of the animation. No-op on mono/i.MX. See nds_force_bw use.
+static bool nds_force_bw()    { return nds_global_config_bool("nds_debug_force_bw", false); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
+
+// hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
+// waveforms are GL16/GLR16; the colour ones (GCC16/GLRC16/GCK16/GLKW16) and the GC16 flash /
+// A2·DU menu modes are everything else.
+#define WF_DU 1u
+#define WF_GL16 3u
+#define WF_GLR16 4u
+#define WF_GCC16 10u
+#define WF_GLRC16 11u
+// Whether an update carrying this waveform should be swept. THE colour guard, validated against
+// libkobo's KoboScreenMTK::handleAutoWfm: it calls fbIsGray(rect) and picks a COLOUR waveform
+// (GCC16=10 / GLRC16=11 / GCK16=8 / GLKW16=9) for non-grey content, a greyscale one (GLR16=4,
+// GL16=3) for text. So a colour page never reaches us as GL16/GLR16 — gating on the waveform
+// skips colour pages, GC16 flashes, AUTO(257), and A2/DU menu updates in a single test, and
+// (unlike the always-set CFA flag field) it is genuinely content-driven. On a mono panel
+// (mxcfb, no CFA) there is no colour to avoid, so sweep any non-flash waveform there.
+// nds_debug_sweep_any_waveform bypasses the allowlist (sweep anything non-GC16) for experiments.
+static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
+    if (nds_global_config_bool("nds_debug_sweep_any_waveform", false)) return wf != WF_GC16;
+    if (plat->cfa_field == 0) return wf != WF_GC16;          // mono panel: no colour to skip
+    return wf == WF_GL16 || wf == WF_GLR16;                  // Kaleido-capable: greyscale reading only
+}
+static const char *nds_wf_name(uint32_t wf) {
+    switch (wf) {
+        case 0: return "INIT"; case WF_DU: return "DU"; case WF_GC16: return "GC16";
+        case WF_GL16: return "GL16"; case WF_GLR16: return "GLR16"; case 6: return "REAGL";
+        case 8: return "GCK16"; case 9: return "GLKW16"; case WF_GCC16: return "GCC16";
+        case WF_GLRC16: return "GLRC16"; case 257: return "AUTO"; default: return "?";
+    }
+}
+static uint32_t nds_dither(const uint8_t *u, const struct nds_platform *plat) {
+    return plat->dith_off ? rd32(u, plat->dith_off) : 0u;
+}
 
 // ---- the sweep: replace one full-screen update with N swept partial strips ----------------
 static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t *orig) {
@@ -297,6 +329,14 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     const struct nds_platform *plat = nds_match(request);
     if (plat && argp) nds_active = plat;
 
+    // Force-B&W: OR CFA_SKIP into every hwtcon update so the whole device renders greyscale.
+    // Applies in every mode except "off" (it's not tied to the animation), in place, once.
+    if (plat && argp && real_ioctl && !nds_off() && !nds_safety_disabled && plat->cfa_skip && nds_force_bw()) {
+        uint8_t *m = (uint8_t *)argp;
+        uint32_t f = rd32(m, plat->flags_off);
+        if (!(f & plat->cfa_skip)) wr32(m, plat->flags_off, f | plat->cfa_skip);
+    }
+
     if (plat && argp && real_ioctl && !nds_safety_disabled && nds_sweep_mode()) {
         // Expire a stale pending-turn so we never sweep an unrelated later full-screen update.
         if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
@@ -308,32 +348,28 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         if ((nds_turn_pending || nds_animate_tap()) && w >= 512 && h >= 512) {
             bool armed = nds_turn_pending != 0;
             nds_turn_pending = 0;                           // consume the trigger (one per turn)
-            // Only animate FLASHLESS turns whose gesture is enabled; never turn a flash into a
-            // wipe. A flash is a GC16 update (hwtcon) or, on i.MX where the reading turn is
-            // PARTIAL, any update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
+            // A flash is a GC16 update (hwtcon) or, on i.MX where the reading turn is PARTIAL, any
+            // update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
             uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
             bool is_flash = (wf == WF_GC16) || (plat->flash_full && md == UPD_FULL);
-            // Kaleido colour page: a non-zero CFA colour-mode field with nds_debug_color_skip
-            // set passes through and full-refreshes normally. OFF by default — see the getter:
-            // Nickel tags every reader update with a CFA mode, so the field alone can't
-            // discriminate colour pages yet.
-            uint32_t cfa_mode = plat->cfa_field ? (rd32(u, plat->flags_off) & plat->cfa_field) : 0u;
-            bool skip_color = cfa_mode != 0 && nds_color_skip();
+            // Sweep only a genuine B&W reading turn whose gesture is enabled. The waveform gate is
+            // the colour guard AND the reader-context guard in one: colour pages get a colour
+            // waveform, flashes/menus/home get GC16/A2/AUTO — none are GL16/GLR16, so none sweep.
             if (!nds_gesture_animate(armed, w)) {
-                // This gesture type is disabled (or the render wasn't caused by a fresh tap):
-                // fall through to the untouched original update.
-            } else if (skip_color) {
+                // Gesture disabled, or the render wasn't caused by a fresh tap — pass through.
+            } else if (is_flash || !nds_wf_sweepable(plat, wf)) {
                 static int cskip = 0;
-                if (nds_log_ioctl() && cskip < 40) { cskip++;
-                    NDS_LOG("SKIP colour page [%s] %ux%u wf=%u cfa=0x%x -> full refresh (nds_debug_color_skip)",
-                            plat->name, w, h, wf, cfa_mode);
+                if (nds_log_ioctl() && cskip < 40 && !is_flash) { cskip++;
+                    NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
+                            plat->name, w, h, wf, nds_wf_name(wf), md == UPD_FULL ? "FULL" : "PARTIAL",
+                            nds_dither(u, plat), rd32(u, plat->flags_off));
                 }
-            } else if (!is_flash) {
+            } else {
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
                 if (nds_log_ioctl() && swept < 40) { swept++;
-                    NDS_LOG("SWEEP [%s] %ux%u wf=%u flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                            rd32(u, OFF_WAVEFORM), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
+                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
+                            wf, nds_wf_name(wf), nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                             (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                 }
                 nds_do_sweep(fd, plat, u);
@@ -378,9 +414,10 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         if (logged < 160) { logged++;
             if (plat && argp) {
                 const uint8_t *u = (const uint8_t *)argp;
-                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u mode=%s flags=0x%x", logged, plat->name,
+                uint32_t owf = rd32(u, OFF_WAVEFORM);
+                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u(%s) mode=%s dither=0x%x flags=0x%x", logged, plat->name,
                         rd32(u, OFF_MARKER), rd32(u, OFF_TOP), rd32(u, OFF_LEFT), rd32(u, OFF_WIDTH), rd32(u, OFF_HEIGHT),
-                        rd32(u, OFF_WAVEFORM), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", rd32(u, plat->flags_off));
+                        owf, nds_wf_name(owf), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", nds_dither(u, plat), rd32(u, plat->flags_off));
             } else if (nds_active && argp && request == nds_active->wait_cmpl) {
                 NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
             } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
@@ -450,12 +487,12 @@ static int nds_init() {
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
     bool gf = nds_gesture_filter_install();
     NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d "
-            "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d color_skip=%d log=%d",
+            "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d force_bw=%d sweep_any_wf=%d log=%d",
             nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), nds_strips(),
             nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
             nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf,
             nds_strip_wf(), nds_wait_complete() ? "complete" : "submission",
-            nds_cfa_skip(), nds_color_skip(), nds_log_ioctl());
+            nds_cfa_skip(), nds_force_bw(), nds_global_config_bool("nds_debug_sweep_any_waveform", false), nds_log_ioctl());
     return 0;
 }
 static bool nds_del(const char *p) { return access(p, F_OK) != 0 ? true : nh_delete_file(p); }

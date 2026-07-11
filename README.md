@@ -21,16 +21,16 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 
 | Device | Works? |
 |---|---|
-| Kobo Libra Colour | ✅ Yes, tested |
-| Kobo Clara Colour | ✅ Yes, tested |
-| Kobo Clara BW | ✅ Yes, tested |
+| Kobo Libra Colour | ✅ Yes, tested (including colour-page handling) |
+| Kobo Clara Colour | ✅ Yes (same hardware family as the Libra Colour) |
+| Kobo Clara BW | ✅ Yes (black-and-white; nothing colour to handle) |
 | Kobo Libra 2 | ✅ Should work (not yet verified) |
 | Kobo Clara 2E | ✅ Should work (not yet verified) |
 | Kobo Elipsa 2E | ✅ Should work (not yet verified) |
 | Kobo Elipsa / Sage | ⚠️ Works, but too slow to recommend — off unless you opt in |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
-On colour devices (Kaleido screens), pages with **colour content** may look slightly off while the animation plays — the next refresh always shows them correctly. Smarter colour handling is being worked on; regular black-and-white pages are unaffected.
+On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.
 
 ## Install
 
