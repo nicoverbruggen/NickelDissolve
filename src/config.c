@@ -48,6 +48,7 @@ static const struct { const char *key; const char *hint; } nds_legacy_keys[] = {
     { "nds_cfa_skip",       "renamed to nds_debug_cfa_skip" },
     { "nds_color_skip",     "renamed to nds_debug_color_skip" },
     { "nds_log_ioctl",      "renamed to nds_debug_log_ioctl" },
+    { "nds_tap_animates",   "replaced by nds_animate_on_tap (with nds_animate_on_swipe / nds_animate_on_button)" },
 };
 
 static const char *nds_legacy_hint(const char *key) {

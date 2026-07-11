@@ -12,8 +12,9 @@ not the perfectly smooth hardware swipe — but with greyscale strips it reads w
 
 ## Setup
 
-Nothing to set up: the animation is ON after installing and rebooting. Swipe to turn a page and
-it wipes in; a tap still turns instantly (that split is deliberate — see `nds_tap_animates`).
+Nothing to set up: the animation is ON after installing and rebooting, for every way of turning
+a page — swipes, taps, and the page-turn buttons. Each gesture can be turned off individually
+(see below).
 
 Elipsa and Sage are the one exception: the wipe is slow on those large panels, so on them the
 mod stays passive unless you explicitly create a config with `nds_mode:sweep`.
@@ -30,12 +31,14 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | `nds_strips` | `8` | number of vertical bands (2–32); more = smoother but slower |
 | `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000) — the speed dial; raise to slow the wipe down |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); backward turns flip automatically |
-| `nds_tap_animates` | `0` | `1` also animates tap turns (taps reuse the last swipe's direction; may catch the odd non-turn refresh) |
+| `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |
+| `nds_animate_on_tap` | `1` | `0` = tap turns change instantly instead of animating |
+| `nds_animate_on_button` | `1` | `0` = page-turn button presses change instantly instead of animating |
 
-Example — slow the wipe down and animate taps too:
+Example — slow the wipe down and make taps turn instantly (classic Kindle-like split):
 
     nds_delay_us:30000
-    nds_tap_animates:1
+    nds_animate_on_tap:0
 
 There are also `nds_debug_*` keys for troubleshooting; they are documented in the project's
 ABOUT.md (https://github.com/nicoverbruggen/NickelDissolve) and are not meant for everyday use.
@@ -43,8 +46,8 @@ ABOUT.md (https://github.com/nicoverbruggen/NickelDissolve) and are not meant fo
 ## Safety
 
 - Only the full-screen page-turn update is ever touched; all other updates (menus, UI, images)
-  pass through unchanged. On Kaleido colour devices, colour pages are detected and left to
-  refresh normally.
+  pass through unchanged. On Kaleido colour devices, pages with colour content may look slightly
+  off during the animation for now; the next refresh always shows them correctly.
 - `nds_mode:observe` changes nothing on screen — it forwards every ioctl untouched and just logs.
 - No hang: the last strip reuses Nickel's update marker, with a fallback to the original update.
 - The hook is `optional` — a firmware/platform mismatch makes the mod inert, not a brick.

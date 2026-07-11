@@ -1,9 +1,10 @@
 include NickelHook/NickelHook.mk
 
 override LIBRARY  := src/libnickeldissolve.so
-override SOURCES  += src/config.c src/nickeldissolve.cc
+override SOURCES  += src/config.c src/nickeldissolve.cc src/gesture.cc
 
-# No Qt needed — this mod only hooks plain settings getters (bool/int returns), no QString.
+# QtCore/QtGui are used for the app-wide gesture event filter (plain QObject override — no
+# widgets, no signals/slots, no moc).
 
 override CFLAGS   += -Wall -Wextra -Werror -fvisibility=hidden
 override CXXFLAGS += -std=gnu++11 -Wall -Wextra -Werror -Wno-missing-field-initializers -fvisibility=hidden -fvisibility-inlines-hidden

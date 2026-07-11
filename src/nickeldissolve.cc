@@ -38,6 +38,7 @@
 #include <NickelHook.h>
 
 #include "config.h"
+#include "gesture.h"
 #include "util.h"
 
 static const char *const NDS_LIBKOBO   = "/usr/local/Kobo/platforms/libkobo.so";
@@ -121,7 +122,7 @@ static long nds_now() { return (long)time(nullptr); }
 
 // ---- config -----------------------------------------------------------------------------
 // The config file is OPTIONAL: no file (or a missing key) means the defaults below. User keys
-// (nds_mode, nds_strips, nds_delay_us, nds_direction, nds_tap_animates) are documented in the
+// (nds_mode, nds_strips, nds_delay_us, nds_direction, nds_animate_on_*) are documented in the
 // on-device doc; nds_debug_* keys are for debugging and documented in ABOUT.md only.
 //
 // nds_mode: "sweep" (DEFAULT — the wipe is on out of the box), "observe" (passthrough + log the
@@ -140,19 +141,24 @@ static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debu
 // the caller's per-platform default (hwtcon 0 — paced by the submission-wait; mxcfb ~20 ms — no
 // submission-wait, else the wipe is instant). Returns µs, clamped to [0, 50000].
 static int  nds_delay_us(int def) { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : def; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
-// false (default): only swipe turns animate (they route through the hookable next/prevPageWithTimer,
-// which also give us direction). true: also animate taps — but taps aren't individually hookable, so
-// this arms on ANY full-screen page render, using the last swipe's direction (see README caveats).
-static bool nds_tap_animates(){ return nds_global_config_bool("nds_tap_animates", false); }
+// Per-gesture control: which page-turn gestures animate. DEFAULT: all of them — always use the
+// transition when possible. Swipes and physical page-turn buttons arm via the ReadingView hooks
+// (told apart by the last input the gesture filter saw); taps are recognised by the app-wide Qt
+// event filter (gesture.cc), since Nickel's tap path isn't hookable.
+static bool nds_animate_swipe()  { return nds_global_config_bool("nds_animate_on_swipe", true); }
+static bool nds_animate_tap()    { return nds_global_config_bool("nds_animate_on_tap", true); }
+static bool nds_animate_button() { return nds_global_config_bool("nds_animate_on_button", true); }
 // Set HWTCON_FLAG_CFA_SKIP on the strips (Kaleido): skips the per-region CFA colour pass whose
 // region boundaries produce the seams. Correct for B&W content (no colour to convert) — and with
 // nds_debug_color_skip on (the default), B&W content is the only thing that ever gets swept.
 static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_skip", true); }
-// Kaleido: do not sweep a COLOUR page at all — the CFA colour conversion needs the whole frame,
-// so chopping it into strips corrupts the colour. A turn whose update carries a CFA colour mode
-// (flags & 0x7f00 != 0) passes through untouched and full-refreshes normally. Set 0 to sweep
-// colour pages anyway (they may look wrong).
-static bool nds_color_skip()  { return nds_global_config_bool("nds_debug_color_skip", true); }
+// Kaleido: skip the sweep on COLOUR pages so they full-refresh normally (the whole-frame CFA
+// colour conversion can't be chopped into strips). DEFAULT OFF for now: on-device logs (Libra
+// Colour, fw 4.45.23697) show Nickel tags EVERY reader update with a CFA colour mode — G2,
+// flags=0x600, B&W text turns included — so a non-zero CFA field alone cannot identify colour
+// pages, and skipping on it suppresses the animation entirely. Narrowing the detection (via the
+// waveform id or the AIE image modes) is on the roadmap; set 1 to re-enable the broad skip.
+static bool nds_color_skip()  { return nds_global_config_bool("nds_debug_color_skip", false); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
@@ -259,6 +265,32 @@ static int nds_do_sweep_sunxi(int fd, unsigned long request, void *argp) {
     return rv;
 }
 
+// ---- per-gesture gating -------------------------------------------------------------------
+// Decide whether this page render should animate, from the per-gesture flags and the last input
+// gesture the Qt event filter saw (gesture.cc). `armed` = the render was announced by a
+// ReadingView turn hook, which is the path swipes AND physical page-turn buttons take — the
+// filter's last input tells them apart. An unarmed render can only be a tap turn (Nickel's tap
+// path isn't hookable), so it must be backed by a fresh TAP; the tap's position also gives the
+// direction (left half = backward, right half = forward — Kobo's reading tap zones), overriding
+// the last swipe's direction. Without the filter (no Qt app yet), fall back to the old
+// behaviour: armed renders count as swipes, unarmed ones animate whenever tap turns are enabled.
+static bool nds_gesture_animate(bool armed, uint32_t width) {
+    long gts = 0; int tap_x = -1;
+    enum nds_gesture g = nds_gesture_last(&gts, &tap_x);
+    bool fresh = g != NDS_GESTURE_NONE && (nds_now() - gts) <= NDS_TURN_WINDOW_S;
+
+    if (armed) {
+        if (fresh && g == NDS_GESTURE_BUTTON) return nds_animate_button();
+        if (fresh && g == NDS_GESTURE_TAP) return nds_animate_tap();
+        return nds_animate_swipe();
+    }
+    if (!nds_animate_tap()) return false;
+    if (!nds_gesture_filter_installed()) return true;   // legacy: any full-screen page render
+    if (!fresh || g != NDS_GESTURE_TAP) return false;   // not caused by a recent tap
+    if (tap_x >= 0 && width > 0) nds_turn_dir = ((uint32_t)tap_x >= width / 2u) ? 0 : 1;
+    return true;
+}
+
 // ---- ioctl hook -------------------------------------------------------------------------
 extern "C" __attribute__((visibility("default")))
 int _nds_ioctl(int fd, unsigned long request, void *argp) {
@@ -271,21 +303,26 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 
         const uint8_t *u = (const uint8_t *)argp;
         uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
-        // Armed by a swipe (turn hook) — or, if nds_tap_animates, by any full-screen page render (taps).
-        if ((nds_turn_pending || nds_tap_animates()) && w >= 512 && h >= 512) {
+        // Armed by a swipe/button (turn hook) — or, when tap turns animate, by any full-screen
+        // page render (Nickel's tap path isn't hookable; nds_gesture_animate narrows it down).
+        if ((nds_turn_pending || nds_animate_tap()) && w >= 512 && h >= 512) {
+            bool armed = nds_turn_pending != 0;
             nds_turn_pending = 0;                           // consume the trigger (one per turn)
-            // Only animate FLASHLESS turns; never turn a flash into a wipe. A flash is a GC16 update
-            // (hwtcon) or, on i.MX where the reading turn is PARTIAL, any update_mode==FULL refresh
-            // (the AUTO/GC16 chapter/ghost-clear). Skip either.
+            // Only animate FLASHLESS turns whose gesture is enabled; never turn a flash into a
+            // wipe. A flash is a GC16 update (hwtcon) or, on i.MX where the reading turn is
+            // PARTIAL, any update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
             uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
             bool is_flash = (wf == WF_GC16) || (plat->flash_full && md == UPD_FULL);
-            // Kaleido colour page: the update's CFA colour-mode field is non-zero, meaning the
-            // driver runs its whole-frame colour conversion for this render. Sweeping it in strips
-            // corrupts the colour (and a mostly-image page has the same whole-frame problem), so
-            // with nds_debug_color_skip (default) it passes through and full-refreshes normally.
+            // Kaleido colour page: a non-zero CFA colour-mode field with nds_debug_color_skip
+            // set passes through and full-refreshes normally. OFF by default — see the getter:
+            // Nickel tags every reader update with a CFA mode, so the field alone can't
+            // discriminate colour pages yet.
             uint32_t cfa_mode = plat->cfa_field ? (rd32(u, plat->flags_off) & plat->cfa_field) : 0u;
             bool skip_color = cfa_mode != 0 && nds_color_skip();
-            if (skip_color) {
+            if (!nds_gesture_animate(armed, w)) {
+                // This gesture type is disabled (or the render wasn't caused by a fresh tap):
+                // fall through to the untouched original update.
+            } else if (skip_color) {
                 static int cskip = 0;
                 if (nds_log_ioctl() && cskip < 40) { cskip++;
                     NDS_LOG("SKIP colour page [%s] %ux%u wf=%u cfa=0x%x -> full refresh (nds_debug_color_skip)",
@@ -313,20 +350,24 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
         const uint32_t *ub = (const uint32_t *)argp;
         const uint32_t area_ptr = ub[0], mode = ub[2];
-        // Armed by a swipe (turn hook) — or, if nds_tap_animates, by any full-screen turn render.
-        if ((nds_turn_pending || nds_tap_animates()) && mode == NDS_SUNXI_TURN_MODE &&
+        // Armed by a swipe/button (turn hook) — or, when tap turns animate, by any full-screen
+        // turn render (nds_gesture_animate narrows it down).
+        if ((nds_turn_pending || nds_animate_tap()) && mode == NDS_SUNXI_TURN_MODE &&
                 area_ptr >= 0x1000u && area_ptr < 0xC0000000u) {
             const uint32_t *a = (const uint32_t *)(uintptr_t)area_ptr;
             uint32_t w = (a[2] >= a[0]) ? a[2] - a[0] + 1 : 0, h = (a[3] >= a[1]) ? a[3] - a[1] + 1 : 0;
             if (w >= 512 && h >= 512) {                       // full-screen page render
+                bool armed = nds_turn_pending != 0;
                 nds_turn_pending = 0;                         // consume the trigger (one per turn)
-                bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
-                static int sswept = 0;
-                if (nds_log_ioctl() && sswept < 40) { sswept++;
-                    NDS_LOG("SWEEP [sunxi] %ux%u turn_mode=0x%x -> %d strips @ mode=0x%x %s", w, h, mode,
-                            nds_strips(), nds_sunxi_strip_mode(), rtl ? "R->L" : "L->R");
+                if (nds_gesture_animate(armed, w)) {
+                    bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                    static int sswept = 0;
+                    if (nds_log_ioctl() && sswept < 40) { sswept++;
+                        NDS_LOG("SWEEP [sunxi] %ux%u turn_mode=0x%x -> %d strips @ mode=0x%x %s", w, h, mode,
+                                nds_strips(), nds_sunxi_strip_mode(), rtl ? "R->L" : "L->R");
+                    }
+                    return nds_do_sweep_sunxi(fd, request, argp);  // return the last strip's frame_id
                 }
-                return nds_do_sweep_sunxi(fd, request, argp);  // return the last strip's frame_id
             }
         }
     }
@@ -378,14 +419,18 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 }
 
 // ---- page-turn hooks: arm the sweep + record direction ----------------------------------
+// These run on the UI thread, so they double as a safe retry point for installing the gesture
+// filter in case the Qt application didn't exist yet at plugin init.
 extern "C" __attribute__((visibility("default")))
 void _nds_nextPageWithTimer(void *self) {
+    nds_gesture_filter_install();
     nds_turn_dir = 0; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: forward"); }
     if (real_nextPageWithTimer) real_nextPageWithTimer(self);
 }
 extern "C" __attribute__((visibility("default")))
 void _nds_prevPageWithTimer(void *self) {
+    nds_gesture_filter_install();
     nds_turn_dir = 1; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_log_ioctl() && n < 16) { n++; NDS_LOG("turn: backward"); }
     if (real_prevPageWithTimer) real_prevPageWithTimer(self);
@@ -400,9 +445,15 @@ static int nds_init() {
         return 0;
     }
     const char *dcfg = nds_global_config_get("nds_delay_us");   // platform-dependent when unset
-    NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s tap=%d | debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d color_skip=%d log=%d",
+    // The plugin normally loads with the Qt application already up (Qt scans imageformats
+    // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
+    // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
+    bool gf = nds_gesture_filter_install();
+    NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d "
+            "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d color_skip=%d log=%d",
             nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), nds_strips(),
-            nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)", nds_tap_animates(),
+            nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
+            nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf,
             nds_strip_wf(), nds_wait_complete() ? "complete" : "submission",
             nds_cfa_skip(), nds_color_skip(), nds_log_ioctl());
     return 0;

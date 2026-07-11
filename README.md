@@ -11,8 +11,8 @@ If you've seen a recent Kindle turn a page, you know the effect: the new page gl
 
 Out of the box:
 
-- **Swiping** to turn a page plays the animation, forward and backward (backward turns sweep the other way).
-- **Tapping** to turn a page stays instant — a deliberate split many people like. (You can change this.)
+- **Every way of turning a page animates** — swipes, taps, and the physical page-turn buttons. Backward turns sweep the other way, and a tap even sweeps toward the side you tapped.
+- Each gesture can be turned off individually if you prefer, say, instant taps with animated swipes.
 - Everything else — menus, the home screen, images — is completely untouched.
 
 It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E Ink screens accept updates), but with the default settings it looks pretty good!
@@ -30,7 +30,7 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 | Kobo Elipsa / Sage | ⚠️ Works, but too slow to recommend — off unless you opt in |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
-On colour devices (Kaleido screens), pages with **colour content** don't animate — they refresh normally, because animating them would distort the colours. Black-and-white pages (regular books) animate as usual.
+On colour devices (Kaleido screens), pages with **colour content** may look slightly off while the animation plays — the next refresh always shows them correctly. Smarter colour handling is being worked on; regular black-and-white pages are unaffected.
 
 ## Install
 
@@ -48,9 +48,9 @@ On colour devices (Kaleido screens), pages with **colour content** don't animate
 You don't need a configuration file — the defaults are tuned per device. If you want to tweak, create a plain-text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` with one setting per line. A few popular ones:
 
 ```
-nds_delay_us:30000    # slow the animation down
-nds_direction:ltr     # sweep left-to-right instead
-nds_tap_animates:1    # animate taps too, not just swipes
+nds_delay_us:30000      # slow the animation down
+nds_direction:ltr       # sweep left-to-right instead
+nds_animate_on_tap:0    # taps turn instantly; swipes and buttons still animate
 ```
 
 Changes apply on the next reboot; delete the file to go back to the defaults. The `doc` file in the same folder on your device explains every setting, and the full reference lives in [ABOUT.md](ABOUT.md).
