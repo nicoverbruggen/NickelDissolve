@@ -1,7 +1,7 @@
 # NickelDissolve
 
 > [!WARNING]
-> **Early, experimental release (v0.1).** Verified on the Kobo Libra Colour and Clara BW so far (including colour-page handling on the Libra Colour); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
+> **Initial, experimental release.** Verified on the Kobo Libra Colour and Clara BW so far (including colour-page handling on the Libra Colour); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
 
 > [!NOTE]
 > **Testers wanted!** I'd love confirmation on other Kobo models, especially the Clara Colour, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
