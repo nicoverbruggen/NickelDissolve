@@ -39,49 +39,37 @@ static void nds_config_append(nds_config_t *cfg, const char *key, const char *va
     cfg->tail = e;
 }
 
-static void nds_config_write_default(void) {
-    mkdir(NDS_CONFIG_DIR, 0755);
+// Keys removed or renamed by the config rework (user keys vs nds_debug_* keys). Warn and ignore
+// them so an old config file changes nothing silently — the log says what to rename.
+static const struct { const char *key; const char *hint; } nds_legacy_keys[] = {
+    { "nds_enabled",        "folded into nds_mode (off|observe|sweep)" },
+    { "nds_strip_waveform", "renamed to nds_debug_strip_waveform" },
+    { "nds_wait",           "renamed to nds_debug_wait" },
+    { "nds_cfa_skip",       "renamed to nds_debug_cfa_skip" },
+    { "nds_color_skip",     "renamed to nds_debug_color_skip" },
+    { "nds_log_ioctl",      "renamed to nds_debug_log_ioctl" },
+};
 
-    FILE *src = fopen(NDS_CONFIG_DIR "/default", "r");
-    if (!src) {
-        NDS_LOG("warning: no default config template at %s/default (%s); leaving config absent", NDS_CONFIG_DIR_DISP, strerror(errno));
-        return;
-    }
-
-    FILE *dst = fopen(NDS_CONFIG_DIR "/config", "w");
-    if (!dst) {
-        NDS_LOG("warning: could not write default config to %s/config (%s)", NDS_CONFIG_DIR_DISP, strerror(errno));
-        fclose(src);
-        return;
-    }
-
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), src)) > 0) {
-        if (fwrite(buf, 1, n, dst) != n) {
-            NDS_LOG("warning: could not fully write default config to %s/config", NDS_CONFIG_DIR_DISP);
-            break;
-        }
-    }
-
-    fclose(src);
-    fclose(dst);
-    NDS_LOG("wrote default config to %s/config from template", NDS_CONFIG_DIR_DISP);
+static const char *nds_legacy_hint(const char *key) {
+    for (size_t i = 0; i < sizeof(nds_legacy_keys) / sizeof(nds_legacy_keys[0]); i++)
+        if (!strcmp(key, nds_legacy_keys[i].key))
+            return nds_legacy_keys[i].hint;
+    return NULL;
 }
 
+// The config file is OPTIONAL and none is shipped: no file means the built-in defaults. A file
+// only needs the keys being overridden; delete it to go back to the defaults.
 nds_config_t *nds_config_parse(void) {
     nds_config_t *cfg = (nds_config_t*)calloc(1, sizeof(nds_config_t));
     if (!cfg)
         return NULL;
 
     FILE *f = fopen(NDS_CONFIG_DIR "/config", "r");
-    if (!f && errno == ENOENT) {
-        NDS_LOG("no config file at %s/config; writing a default one", NDS_CONFIG_DIR_DISP);
-        nds_config_write_default();
-        f = fopen(NDS_CONFIG_DIR "/config", "r");
-    }
     if (!f) {
-        NDS_LOG("could not open %s/config (%s); using built-in defaults", NDS_CONFIG_DIR_DISP, strerror(errno));
+        if (errno == ENOENT)
+            NDS_LOG("no config file at %s/config; using the defaults (create one to override)", NDS_CONFIG_DIR_DISP);
+        else
+            NDS_LOG("could not open %s/config (%s); using built-in defaults", NDS_CONFIG_DIR_DISP, strerror(errno));
         return cfg;
     }
 
@@ -110,6 +98,12 @@ nds_config_t *nds_config_parse(void) {
         }
         if (!cur) {
             NDS_LOG("warning: %s/config: line %d: expected ':' after key '%s', ignoring line", NDS_CONFIG_DIR_DISP, lineno, key);
+            continue;
+        }
+
+        const char *hint = nds_legacy_hint(key);
+        if (hint) {
+            NDS_LOG("warning: %s/config: line %d: legacy key '%s' (%s); ignoring", NDS_CONFIG_DIR_DISP, lineno, key, hint);
             continue;
         }
 
