@@ -82,8 +82,9 @@ Curious how it works, what every configuration value (including the `nds_debug_*
 
 ## Credits
 
-Built with support from large language models, and with prior Kobo modding experience from:
+Built on [NickelHook](https://github.com/pgaskin/NickelHook) by Patrick Gaskin.
 
-- [NickelHome](https://github.com/nicoverbruggen/NickelHome)
-- [NickelTypeFix](https://github.com/nicoverbruggen/NickelTypeFix)
-- [NickelCoverFix](https://github.com/nicoverbruggen/NickelCoverFix)
+This mod was created by the author with the help of the following large language models:
+
+- Claude Opus 4.8
+- Claude Fable
