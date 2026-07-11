@@ -49,6 +49,17 @@ enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
 #define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
 #define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
 
+// sunxi (AllWinner B300: Elipsa, Sage) DISP_EINK ioctls — a different family (raw numbers, via /dev/disp).
+// OBSERVE-ONLY for now: these aren't in the platform table, so the sweep never fires on sunxi; we just log.
+#define NDS_DISP_EINK_UPDATE   0x0402UL   // arg = ubuffer[7]; ubuffer[0] -> area_info{x_top,y_top,x_bottom,y_bottom}
+#define NDS_DISP_EINK_UPDATE2  0x0406UL   // ditto (newer); ubuffer[4] -> frame_id (out)
+#define NDS_DISP_EINK_WAIT     0x4014UL   // DISP_EINK_WAIT_FRAME_SYNC_COMPLETE
+// On the Elipsa (id 387), every page-turn hook is followed by a full-screen UPDATE2 with this
+// update_mode; the occasional 0x80000004 is the full-flash refresh and 0x4 is book-open. We only
+// sweep the reading-turn mode (mirrors the hwtcon "skip GC16" rule: never turn a flashless turn
+// into a flash). Field is ubuffer[2].
+#define NDS_SUNXI_TURN_MODE    0x80440UL
+
 // ---- platform table: which ioctls carry an e-ink update, per driver ----
 struct nds_platform {
     const char   *name;
@@ -158,6 +169,59 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     nds_ephemeral_marker += (uint32_t)N;
 }
 
+// sunxi strip update_mode: a FAST partial-rect refresh. The turn's own mode (0x80440) is GLR16
+// (REAGL) — the slowest, highest-quality waveform; 8 REAGL bands on the big Elipsa panel crawl
+// (~1 s each). We don't need REAGL quality mid-wipe, so strips use GL16 | RECT (0x420) by default:
+// full 16-level greyscale but far faster, and it's exactly the mode Nickel uses for its own partial
+// updates. nds_strip_waveform (non-zero) overrides the waveform with a raw *sunxi* id
+// (2=DU 4=GC16 0x10=A2 0x20=GL16 0x40=GLR16); 0 = the GL16 default. The 0x80000 "global" flag from
+// the turn mode is intentionally dropped.
+static uint32_t nds_sunxi_strip_mode() {
+    uint32_t wf = nds_strip_wf();
+    if (wf == 0) wf = 0x20;            // GL16: fast + full greyscale
+    return (wf & 0xFFFu) | 0x400u;     // | RECT
+}
+
+// ---- sunxi (AllWinner B300: Elipsa/Sage) band-wipe --------------------------------------
+// A very different interface from hwtcon/mxcfb, but *simpler* for our purposes:
+//   - the update arg is a `ubuffer[7]` and ub[0] is a *pointer* to an area_info
+//     {x_top,y_top,x_bottom,y_bottom} (inclusive bbox), ub[2] is the update_mode.
+//   - the wait is generic (DISP_EINK_WAIT_FRAME_SYNC_COMPLETE) — NOT keyed on a per-update marker.
+// So there is no marker contract to preserve: we just re-issue N partial UPDATE2s, each a copy of
+// Nickel's ubuffer with ub[0] pointed at our own strip rect. Nickel's own frame-sync wait then
+// covers all of them. We return the last strip's frame_id so any read of it stays valid.
+static int nds_do_sweep_sunxi(int fd, unsigned long request, void *argp) {
+    uint32_t *ub = (uint32_t *)argp;
+    const uint32_t area_ptr = ub[0];
+    if (area_ptr < 0x1000u || area_ptr >= 0xC0000000u) return real_ioctl(fd, request, argp);
+    const uint32_t *a = (const uint32_t *)(uintptr_t)area_ptr;
+    const uint32_t x0 = a[0], y0 = a[1], x1 = a[2], y1 = a[3];   // inclusive bbox
+    const uint32_t W = (x1 >= x0) ? (x1 - x0 + 1) : 0;
+    const int N = nds_strips();
+    const uint32_t sw = (N > 0) ? W / (uint32_t)N : 0;
+    if (sw == 0) return real_ioctl(fd, request, argp);
+    const int delay = nds_delay_us();
+    bool rtl = nds_rtl();
+    if (nds_turn_dir == 1) rtl = !rtl;                          // backward turn sweeps the opposite way
+
+    uint32_t myub[8];
+    memcpy(myub, ub, 7 * sizeof(uint32_t));                     // copy Nickel's ubuffer (7 longs)
+    myub[2] = nds_sunxi_strip_mode();                           // fast partial waveform (REAGL too slow)
+    uint32_t strip[4];                                          // our own area_info; ub[0] points here
+    int rv = 0;
+    for (int k = 0; k < N; k++) {
+        int col = rtl ? (N - 1 - k) : k;
+        uint32_t left  = x0 + (uint32_t)col * sw;
+        uint32_t right = (col == N - 1) ? x1 : (left + sw - 1); // last column takes the remainder
+        strip[0] = left; strip[1] = y0; strip[2] = right; strip[3] = y1;
+        myub[0] = (uint32_t)(uintptr_t)strip;                  // ioctl copies *strip synchronously
+        int r = real_ioctl(fd, request, myub);
+        if (r >= 0) rv = r;                                    // keep the last valid frame_id
+        if (delay > 0 && k != N - 1) usleep((useconds_t)delay);
+    }
+    return rv;
+}
+
 // ---- ioctl hook -------------------------------------------------------------------------
 extern "C" __attribute__((visibility("default")))
 int _nds_ioctl(int fd, unsigned long request, void *argp) {
@@ -189,6 +253,31 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         }
     }
 
+    // sunxi (Elipsa/Sage) sweep: turn-armed, full-screen UPDATE2 at the reading-turn mode.
+    // No platform-table match here (0x0406 isn't an 'F'-magic ioctl); gate on the ioctl number.
+    if (nds_enabled() && !nds_safety_disabled && nds_sweep_mode() && real_ioctl && argp &&
+            request == NDS_DISP_EINK_UPDATE2) {
+        if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
+        const uint32_t *ub = (const uint32_t *)argp;
+        const uint32_t area_ptr = ub[0], mode = ub[2];
+        // Armed by a swipe (turn hook) — or, if nds_tap_animates, by any full-screen turn render.
+        if ((nds_turn_pending || nds_tap_animates()) && mode == NDS_SUNXI_TURN_MODE &&
+                area_ptr >= 0x1000u && area_ptr < 0xC0000000u) {
+            const uint32_t *a = (const uint32_t *)(uintptr_t)area_ptr;
+            uint32_t w = (a[2] >= a[0]) ? a[2] - a[0] + 1 : 0, h = (a[3] >= a[1]) ? a[3] - a[1] + 1 : 0;
+            if (w >= 512 && h >= 512) {                       // full-screen page render
+                nds_turn_pending = 0;                         // consume the trigger (one per turn)
+                bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                static int sswept = 0;
+                if (nds_log_ioctl() && sswept < 40) { sswept++;
+                    NDS_LOG("SWEEP [sunxi] %ux%u turn_mode=0x%x -> %d strips @ mode=0x%x %s", w, h, mode,
+                            nds_strips(), nds_sunxi_strip_mode(), rtl ? "R->L" : "L->R");
+                }
+                return nds_do_sweep_sunxi(fd, request, argp);  // return the last strip's frame_id
+            }
+        }
+    }
+
     // observe: log the e-ink ioctl stream (first 160), passthrough unchanged
     if (nds_enabled() && !nds_safety_disabled && nds_log_ioctl() && NDS_IOC_MAGIC(request) == 0x46) {
         static int logged = 0;
@@ -202,6 +291,30 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
             } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
                 NDS_LOG("ioctl #%d WAIT_SUBMISSION marker=%u", logged, *(const uint32_t *)argp);
+            }
+        }
+    }
+
+    // observe (sunxi/AllWinner): log the DISP_EINK update stream (Elipsa/Sage). Passthrough unchanged.
+    if (nds_enabled() && !nds_safety_disabled && nds_log_ioctl() &&
+            (request == NDS_DISP_EINK_UPDATE || request == NDS_DISP_EINK_UPDATE2 || request == NDS_DISP_EINK_WAIT)) {
+        static int slog = 0;
+        if (slog < 120) { slog++;
+            if (request == NDS_DISP_EINK_WAIT) {
+                NDS_LOG("sunxi #%d WAIT_FRAME_SYNC", slog);
+            } else if (argp) {
+                const uint32_t *ub = (const uint32_t *)argp;   // ubuffer[0..6] (7 longs)
+                uint32_t area_ptr = ub[0];
+                const char *kind = (request == NDS_DISP_EINK_UPDATE2) ? "UPDATE2" : "UPDATE";
+                // area is a *pointer* to {x_top,y_top,x_bottom,y_bottom}; deref only if it looks like a userspace ptr
+                if (area_ptr >= 0x1000u && area_ptr < 0xC0000000u) {
+                    const uint32_t *a = (const uint32_t *)(uintptr_t)area_ptr;
+                    NDS_LOG("sunxi #%d %s area=(%u,%u -> %u,%u) mode=0x%x ub=[%x %x %x %x %x %x %x]", slog, kind,
+                            a[0], a[1], a[2], a[3], ub[2], ub[0], ub[1], ub[2], ub[3], ub[4], ub[5], ub[6]);
+                } else {
+                    NDS_LOG("sunxi #%d %s (area@0x%x not deref'd) mode=0x%x ub=[%x %x %x %x %x %x %x]", slog, kind,
+                            area_ptr, ub[2], ub[0], ub[1], ub[2], ub[3], ub[4], ub[5], ub[6]);
+                }
             }
         }
     }

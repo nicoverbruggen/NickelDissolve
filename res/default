@@ -3,8 +3,8 @@
 #
 # Kindle-style directional page-turn "band wipe": the new page sweeps in strip-by-strip instead
 # of a single flat refresh. Kobo-agnostic — works on the hwtcon (MTK: Clara BW/Colour, Libra
-# Colour) and mxcfb (i.MX) update paths by reusing the turn's own e-ink update, chopped into
-# swept partial strips.
+# Colour), mxcfb (i.MX) and sunxi (AllWinner: Elipsa/Sage) update paths by reusing the turn's own
+# e-ink update, chopped into swept partial strips.
 #
 # ── SAFETY ──────────────────────────────────────────────────────────────────────────────
 # Default mode is "observe": nothing changes, it just logs the e-ink ioctl stream. Set
