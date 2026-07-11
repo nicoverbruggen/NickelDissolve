@@ -1,10 +1,10 @@
 # NickelDissolve
 
 > [!WARNING]
-> **Early, experimental release (v0.1).** Verified on the Kobo Libra Colour so far (including colour-page handling); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
+> **Early, experimental release (v0.1).** Verified on the Kobo Libra Colour and Clara BW so far (including colour-page handling on the Libra Colour); other devices are expected to work but haven't been confirmed on hardware. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
 
 > [!NOTE]
-> **Testers wanted!** I'd love confirmation on other Kobo models, especially the Clara Colour, Clara BW, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
+> **Testers wanted!** I'd love confirmation on other Kobo models, especially the Clara Colour, Libra 2, Clara 2E, and Elipsa 2E. If you can try it and report back (a page-turn log helps a lot), please comment on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)**.
 
 NickelDissolve gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
 
@@ -28,7 +28,7 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 |---|---|
 | Kobo Libra Colour | ✅ Yes, tested (including colour-page handling) |
 | Kobo Clara Colour | ✅ Yes (same hardware family as the Libra Colour) |
-| Kobo Clara BW | ✅ Yes (black-and-white; nothing colour to handle) |
+| Kobo Clara BW | ✅ Yes, tested (black-and-white) |
 | Kobo Libra 2 | ✅ Should work (not yet verified) |
 | Kobo Clara 2E | ✅ Should work (not yet verified) |
 | Kobo Elipsa 2E | ✅ Should work (not yet verified) |

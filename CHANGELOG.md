@@ -25,9 +25,9 @@ public update interface, with no driver patching.
 
 ### Device support
 
-- **Verified on hardware:** Kobo Libra Colour (including colour-page handling).
-- **Expected to work (not yet hardware-verified):** Kobo Clara Colour, Clara BW, Libra 2,
-  Clara 2E, Elipsa 2E.
+- **Verified on hardware:** Kobo Libra Colour (including colour-page handling) and Kobo Clara BW.
+- **Expected to work (not yet hardware-verified):** Kobo Clara Colour, Libra 2, Clara 2E,
+  Elipsa 2E.
 - **Works but off by default** (the wipe is slow on the large panels): Kobo Elipsa and Sage.
   Opt in with `nds_mode:sweep`.
 - **Any other device:** the mod stays inactive, with no animation and no risk.
