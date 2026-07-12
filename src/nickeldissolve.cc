@@ -98,8 +98,9 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
-    // No submission-wait to pace strips, so default to ~20 ms/strip or the wipe is near-instant.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  20000, 0,  6 },
+    // No submission-wait to pace strips, so default to ~30 ms/strip: the slower REAGL bands need the
+    // room to settle before the next one (tuned on a Libra 2), or the wipe is instant / steppy.
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6 },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -172,7 +173,7 @@ static int  nds_strips()      { const char *v = nds_global_config_get("nds_strip
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debug_wait"); return w && !strcasecmp(w, "complete"); }
 // Inter-strip delay. If nds_delay_us is set in config it always wins; if it's absent, fall back to
-// the caller's per-platform default (hwtcon 0 — paced by the submission-wait; mxcfb ~20 ms — no
+// the caller's per-platform default (hwtcon 0 — paced by the submission-wait; mxcfb ~30 ms — no
 // submission-wait, else the wipe is instant). Returns µs, clamped to [0, 50000].
 static int  nds_delay_us(int def) { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : def; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
 // Per-gesture control: which page-turn gestures animate. DEFAULT: all of them — always use the

@@ -45,8 +45,9 @@ On colour devices (Kaleido screens), pages with **colour content** are detected 
 
 ## Removing or turning it off
 
+- **Turn off or on from Settings (easiest):** on your Kobo, open **Settings**, go to **Reading**, and under **Page Appearance** you'll find a **Page turn animations:** switch, right alongside the built-in options like Dark Mode. Uncheck it to turn the animation off, check it to turn it back on. The change takes effect on the very next page turn and is remembered after a reboot, so there's no file to edit. (On the rare device where this switch can't be added, use the config-file method below instead.)
 - **Remove completely:** delete the file `KOBOeReader/.adds/nickel-dissolve/uninstall` and reboot. The mod removes itself.
-- **Turn off but keep installed:** create a text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` containing the line `nds_mode:off`, then reboot.
+- **Turn off but keep installed (config file):** create a text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` containing the line `nds_mode:off`, then reboot.
 
 ## Customizing
 

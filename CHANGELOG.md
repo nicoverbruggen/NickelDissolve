@@ -23,6 +23,14 @@ file: each `## vX.Y` heading must exactly match a git tag.
   by mistake. The mod now tracks whether the reader is actually on screen and only applies that
   first-turn handling when a book is genuinely open.
 
+### Improved
+
+- **Smoother page-turn animation on i.MX devices such as the Kobo Libra 2.** These panels pace the
+  wipe with a fixed delay between bands instead of the hardware timing the newer panels use, and
+  the default delay is now a little longer so each band settles cleanly before the next. This
+  removes the slight steppiness on those devices. Tuned and confirmed on the Kobo Libra 2, which is
+  now hardware-verified.
+
 ## v0.2
 
 Reliability and polish for the page-turn animation, confirmed on the Kobo Clara BW and Kobo
