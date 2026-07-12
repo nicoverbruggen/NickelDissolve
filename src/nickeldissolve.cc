@@ -39,6 +39,7 @@
 
 #include "config.h"
 #include "gesture.h"
+#include "settingsui.h"
 #include "util.h"
 
 static const char *const NDS_LIBKOBO   = "/usr/local/Kobo/platforms/libkobo.so";
@@ -146,7 +147,13 @@ static long nds_now() { return (long)time(nullptr); }
 // nds_mode: "sweep" (DEFAULT — the wipe is on out of the box), "observe" (passthrough + log the
 // ioctl stream), or "off" (fully inert, no logging). Anything else falls back to sweep.
 static bool nds_mode_is(const char *m) { const char *v = nds_global_config_get("nds_mode"); return v && !strcasecmp(v, m); }
-static bool nds_off()         { return nds_mode_is("off"); }
+// Runtime enable flag driven by the Reading-settings toggle (settingsui.cc): -1 = follow the
+// config's nds_mode, 0 = the toggle forced it off, 1 = forced on. Lets the toggle take effect on
+// the next page turn without a reboot; the toggle also persists nds_mode to the config file.
+extern "C" { volatile int nds_runtime_animate = -1; }
+static bool nds_off()         { if (nds_runtime_animate == 0) return true; if (nds_runtime_animate == 1) return false; return nds_mode_is("off"); }
+// Current effective on/off, for the toggle's initial state (settingsui.cc).
+extern "C" int nds_animations_enabled(void) { return !nds_off(); }
 static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 // sunxi (Elipsa/Sage) is functional but NOT recommended (huge panels, slow bands), so it never
 // sweeps by default: it requires nds_mode:sweep to be set explicitly in the config.
@@ -397,12 +404,14 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             }
             // First turn after a book open: Kobo forces GC16 on it. nds_first_turn_pending was armed
             // by the open settle; if this is that turn's GC16, animate it as a Regal sweep instead.
-            // REQUIRE armed: converting bypasses the waveform gate (which normally keeps home/menus
-            // from sweeping), so we only do it for a genuine forward/back turn (the *PageWithTimer
-            // hook fired). Home, menu, and opening another book never arm, so they can't be mistaken
-            // for the first turn even while the flag is still pending. (Tap first-turns are unarmed
-            // and indistinguishable from a menu/home tap here, so they keep Kobo's flash.)
-            bool convert_first_turn = nds_first_turn_pending && armed && is_flash && wf == WF_GC16 && nds_animate_first_turn();
+            // Converting bypasses the waveform gate (which normally keeps home/menus from sweeping),
+            // so we only do it when we KNOW we're in a book: either the render is armed (a
+            // *PageWithTimer forward/back turn) or the ReadingView is on screen. Home / menu / opening
+            // another book are neither armed nor in-reader, so they can't be mistaken for the first
+            // turn even while the flag is still pending. Using the reader flag (not just armed) also
+            // lets an unarmed tap first-turn convert.
+            bool convert_first_turn = nds_first_turn_pending && (armed || nds_reader_is_open())
+                                      && is_flash && wf == WF_GC16 && nds_animate_first_turn();
             // Sweep only a genuine B&W reading turn whose gesture is enabled. The waveform gate is
             // the colour guard AND the reader-context guard in one: colour pages get a colour
             // waveform, flashes/menus/home get GC16/A2/AUTO — none are GL16/GLR16, so none sweep.
@@ -430,8 +439,8 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     wr32(conv, OFF_WAVEFORM, plat->read_wf);   // GC16 flash -> flashless Regal
                     bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                     if (nds_verbose_enabled)
-                        NDS_LOG("FIRST-TURN [%s] %ux%u: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
-                                plat->name, w, h, plat->read_wf, nds_wf_name(plat->read_wf), rtl ? "R->L" : "L->R");
+                        NDS_LOG("FIRST-TURN [%s] %ux%u armed=%d reader_open=%d: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
+                                plat->name, w, h, armed, nds_reader_is_open(), plat->read_wf, nds_wf_name(plat->read_wf), rtl ? "R->L" : "L->R");
                     nds_do_sweep(fd, plat, conv);
                     return 0;
                 }
@@ -625,6 +634,16 @@ static struct nh_hook NickelDissolveHooks[] = {
     { .sym = "_ZN11ReadingView17prevPageWithTimerEv", .sym_new = "_nds_prevPageWithTimer",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_prevPageWithTimer),
       .desc = "arm sweep, backward", .optional = true },
+    //libnickel 4.6.9960 * _ZN21N3SettingsReadingViewC1EP7QWidget
+    { .sym = "_ZN21N3SettingsReadingViewC1EP7QWidget", .sym_new = "_nds_settings_ctor",
+      .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_settings_ctor),
+      .desc = "add Page-turn-animations toggle to Reading settings", .optional = true },
+    {0},
+};
+static struct nh_dlsym NickelDissolveDlsym[] = {
+    //libnickel 4.6.9960 * _ZN13TouchCheckBoxC1EP7QWidget
+    { .name = "_ZN13TouchCheckBoxC1EP7QWidget", .out = nh_symoutptr(nds_touchcheckbox_ctor),
+      .desc = "TouchCheckBox ctor (native Reading-settings checkbox)", .optional = true },
     {0},
 };
 
@@ -632,6 +651,6 @@ NickelHook(
     .init      = &nds_init,
     .info      = &NickelDissolveInfo,
     .hook      = &NickelDissolveHooks[0],
-    .dlsym     = NULL,
+    .dlsym     = &NickelDissolveDlsym[0],
     .uninstall = &nds_uninstall,
 )

@@ -1,10 +1,13 @@
 include NickelHook/NickelHook.mk
 
 override LIBRARY  := src/libnickeldissolve.so
-override SOURCES  += src/config.c src/nickeldissolve.cc src/gesture.cc
+override SOURCES  += src/config.c src/nickeldissolve.cc src/gesture.cc src/settingsui.cc
+override MOCS     += src/ndsbridge.h
 
-# QtCore/QtGui are used for the app-wide gesture event filter (plain QObject override — no
-# widgets, no signals/slots, no moc).
+# QtCore/QtGui: the app-wide gesture event filter and reader-state tracking (plain QObject).
+# QtWidgets + the moc'd NdsBridge: the "Page turn animations" toggle inserted into the Reading
+# settings page (a native SettingItemWithToggleSwitch row).
+override PKGCONF  += Qt5Widgets
 
 override CFLAGS   += -Wall -Wextra -Werror -fvisibility=hidden
 override CXXFLAGS += -std=gnu++11 -Wall -Wextra -Werror -Wno-missing-field-initializers -fvisibility=hidden -fvisibility-inlines-hidden

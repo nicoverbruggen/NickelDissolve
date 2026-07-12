@@ -5,6 +5,24 @@ file: each `## vX.Y` heading must exactly match a git tag.
 
 ## Unreleased
 
+## v0.3
+
+### Added
+
+- A **"Page turn animations:" setting in the Reading settings page**, in the Page Appearance
+  section alongside the built-in options, so you can turn the animation on or off without editing
+  a config file. It is built to match the native rows exactly, takes effect on the next page turn,
+  and is remembered across reboots. On any device where the setting cannot be added cleanly it is
+  simply left out, and the config file still works as before.
+
+### Fixed
+
+- **The first-page-turn animation can no longer fire outside a book.** The special handling that
+  turns the forced full refresh on a book's first page turn into a smooth animation was only
+  guarded by the page-turn buttons, so in rare cases the home screen or a menu could be animated
+  by mistake. The mod now tracks whether the reader is actually on screen and only applies that
+  first-turn handling when a book is genuinely open.
+
 ## v0.2
 
 Reliability and polish for the page-turn animation, confirmed on the Kobo Clara BW and Kobo

@@ -33,4 +33,8 @@ enum nds_gesture nds_gesture_last(long *ts_out, int *tap_x_out);
 // "a later, separate turn". Safe to call from any thread.
 long nds_gesture_seq(void);
 
+// 1 while the reader (ReadingView) is on screen, i.e. a book is open; 0 on the home/library. The
+// filter tracks it from the ReadingView widget's Show/Hide events. Safe to call from any thread.
+int nds_reader_is_open(void);
+
 #endif

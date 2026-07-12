@@ -40,6 +40,7 @@ volatile int  g_last  = NDS_GESTURE_NONE;
 volatile long g_ts    = 0;
 volatile int  g_tap_x = -1;
 volatile long g_seq   = 0;   // bumped once per finished gesture
+volatile int  g_reader_open = 0;   // 1 while the ReadingView widget is shown (a book is open)
 
 // Press-position bookkeeping (UI thread only).
 int  g_press_x = 0, g_press_y = 0;
@@ -118,6 +119,25 @@ public:
             g_ts    = (long)time(nullptr);
             g_seq++;
             break;
+        case QEvent::Show:
+        case QEvent::Hide: {
+            // Track whether the reader (ReadingView) is on screen. This gives the sweep logic a
+            // reliable "are we in a book" signal, so a full-screen flash that isn't a page turn
+            // (home, menu, opening another book) is never mistaken for a reading turn.
+            const QMetaObject *mo = obj ? obj->metaObject() : nullptr;
+            const char *cls = mo ? mo->className() : "";
+            if (!strcmp(cls, "ReadingView")) {
+                g_reader_open = (ev->type() == QEvent::Show) ? 1 : 0;
+                if (nds_verbose_enabled)
+                    NDS_LOG("reader: ReadingView %s -> reader_open=%d",
+                        ev->type() == QEvent::Show ? "Show" : "Hide", g_reader_open);
+            } else if (nds_verbose_enabled && (strstr(cls, "eading") || strstr(cls, "eader"))) {
+                // Discovery aid: if the reader view isn't literally "ReadingView", surface the name.
+                static int n = 0;
+                if (n < 30) { n++; NDS_LOG("reader?: %s %s (not matched)", ev->type() == QEvent::Show ? "Show" : "Hide", cls); }
+            }
+            break;
+        }
         default:
             break;
         }
@@ -149,4 +169,8 @@ enum nds_gesture nds_gesture_last(long *ts_out, int *tap_x_out) {
 
 long nds_gesture_seq(void) {
     return g_seq;
+}
+
+int nds_reader_is_open(void) {
+    return g_reader_open;
 }
