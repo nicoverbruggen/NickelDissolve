@@ -10,6 +10,13 @@ strips, swept across the screen. Each strip transitions from the old page to the
 sweep reads as a directional wipe. It's a stepped wipe (the driver serialises rapid partials),
 not the perfectly smooth hardware swipe, but with greyscale strips it reads well.
 
+## Device support
+
+Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour, and Libra Colour.
+On other devices (the older Libra 2 and Clara 2E, and the large Elipsa and Sage) the mod still
+installs and can run, but it is not officially supported and may not work. The "Page turn
+animations" entry in the Reading settings tells you whether your device is supported.
+
 ## Setup
 
 Nothing to set up: the animation is ON after installing and rebooting, for every way of turning

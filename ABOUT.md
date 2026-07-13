@@ -89,20 +89,20 @@ The filter observes only; every event passes through unchanged. If it isn't inst
 
 ## Device support
 
-Target coverage is **Elipsa and newer**. *Supported* = the mod drives this platform; *Tested by author* = personally run on the hardware (untested devices share an interface with a tested one, so they should work, but haven't been verified).
+**Officially supported: the modern MediaTek (`hwtcon`) devices.** These are the Kobo Clara BW, Clara Colour, and Libra Colour, and they are what the animation is built and tested for. The i.MX (`mxcfb`) and AllWinner (`sunxi`) code paths are still present, so the mod installs and can run on those devices too, but they are **not officially supported and may not work**; on them the Reading-settings entry shows an *Unsupported* note in place of the toggle. *Tested by author* = personally run on the hardware.
 
-| Device | Chipset | Platform | Supported | Tested by author |
+| Device | Chipset | Platform | Officially supported | Tested by author |
 |---|---|---|---|---|
 | **Clara BW** | MediaTek MT8113T | hwtcon (mono) | ✅ Yes | ✅ Yes |
 | **Clara Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Yes | ✅ Yes |
 | **Libra Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Yes | ✅ Yes |
-| **Elipsa 2E** | MediaTek MT8113T | hwtcon (mono) | ✅ Yes | ❌ No |
-| **Libra 2** | NXP i.MX6SLL | mxcfb | ✅ Yes | ❌ No |
-| **Clara 2E** | NXP i.MX6SLL | mxcfb | ✅ Yes | ❌ No |
-| **Elipsa** | AllWinner B300 | sunxi | ⚠️ Not recommended | ✅ Yes |
-| **Sage** | AllWinner B300 | sunxi | ⚠️ Not recommended | ❌ No |
+| **Elipsa 2E** | MediaTek MT8113T | hwtcon (mono) | ✅ Yes (same modern family) | ❌ No |
+| **Libra 2** | NXP i.MX6SLL | mxcfb | ❌ No (may work if installed) | ❌ No |
+| **Clara 2E** | NXP i.MX6SLL | mxcfb | ❌ No (may work if installed) | ❌ No |
+| **Elipsa** | AllWinner B300 | sunxi | ❌ No (may work if installed) | ✅ Yes |
+| **Sage** | AllWinner B300 | sunxi | ❌ No (may work if installed) | ❌ No |
 
-**Any device not listed above is unsupported by default.** On an unrecognised platform the mod simply stays inert (no animation, no risk); it won't sweep unless the device is on one of the interfaces above.
+The "officially supported" test is the driver family: the mod treats the modern `hwtcon` interface as supported and everything else (`mxcfb`, `sunxi`, or an unrecognised platform) as unsupported. On an unrecognised platform the mod stays inert (no animation, no risk); it won't sweep unless the device is on one of the interfaces above.
 
 The sunxi devices (Elipsa, Sage) use a **different update interface** (`DISP_EINK_UPDATE2`, a pointer-based `ubuffer`, generic frame-sync wait) that doesn't fit the flat offset table, so they get a dedicated code path. It works (a real directional wipe, confirmed on an Elipsa), but these are big panels, and each e-ink band renders slowly on them, so the sweep is more of a deliberate wipe than a quick one. It's fully functional, just **not recommended** at these display sizes, so unlike the other platforms it does not sweep by default: create a config with an explicit `nds_mode:sweep` if you want it anyway.
 
@@ -122,7 +122,7 @@ This is a work in progress. Known gaps and things I still want to do, roughly in
 - **✅ Waveform-based colour skip, confirmed on hardware (Libra Colour, fw 4.45.23697).** A colour kepub logged `SWEEP … wf=4(GLR16)` on every B&W text turn and `SKIP … wf=10(GCC16) … not a B&W reading turn` on every colour/image turn, with `flags=0x600` present on *both* (confirming the CFA field is device-level, not content). The `GL16`/`GLR16`-only allowlist separates them cleanly; menu (`AUTO`/`DU`) and exit-to-home (`GC16`) renders were also correctly passed through. Clara Colour shares the exact MT8113T hwtcon-Kaleido `KoboScreenMTK` path, so the same holds; Clara BW is mono (GLR16 turns, no colour). Remaining: physically confirm on the two Clara models.
 - **✅ Per-gesture control, confirmed on hardware.** Startup logged `gesture_filter=1` and swipe turns animated with correct direction. Remaining: confirm tap direction-from-position and BUTTON classification on a device with page-turn buttons (the Libra Colour has none).
 - **sunxi (Elipsa / Sage) speed.** The sunxi path works and produces a directional wipe, but each e-ink band is slow on these large panels, so it's not recommended there (see the table). Worth revisiting with waveform/strip tuning to see if it can be made snappy enough to recommend. Sage is untested.
-- **Untested devices.** Elipsa 2E, Clara 2E and Libra 2 share an interface with tested devices but haven't been run on hardware; see the table above.
+- **Non-supported devices.** The i.MX (Libra 2, Clara 2E) and sunxi (Elipsa, Sage) code paths remain in the mod so those devices can still install and run it, but they are not officially supported and may not work; the settings entry marks them Unsupported. Elipsa 2E shares the modern `hwtcon` interface with the supported devices and is treated as supported, but hasn't been run on hardware.
 
 ## Build
 

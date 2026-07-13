@@ -169,6 +169,13 @@ extern "C" { volatile int nds_runtime_animate = -1; }
 static bool nds_off()         { if (nds_runtime_animate == 0) return true; if (nds_runtime_animate == 1) return false; return nds_mode_is("off"); }
 // Current effective on/off, for the toggle's initial state (settingsui.cc).
 extern "C" int nds_animations_enabled(void) { return !nds_off(); }
+// Whether the animation is OFFICIALLY supported on this device: the modern MTK/hwtcon family (Clara
+// BW/Colour, Libra Colour). Detected from the e-ink driver seen at runtime (nds_active is set the
+// first time a page renders through the hwtcon/mxcfb update ioctl, which happens long before the
+// Reading-settings panel can open). The i.MX (mxcfb) and sunxi families still run the animation if
+// enabled, but are not officially supported, so the settings UI shows them an "Unsupported" note
+// instead of the toggle. Unknown / not-yet-detected also reads as unsupported.
+extern "C" int nds_device_supported(void) { return (nds_active && !strcmp(nds_active->name, "hwtcon")) ? 1 : 0; }
 static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 // sunxi (Elipsa/Sage) is functional but NOT recommended (huge panels, slow bands), so it never
 // sweeps by default: it requires nds_mode:sweep to be set explicitly in the config.
@@ -213,10 +220,6 @@ static bool nds_animate_first_turn() { return nds_global_config_bool("nds_animat
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
-// The settle waveform (mxcfb: the full-quality pass after the fast DU wipe). Default GC16 = a clean
-// full flash. nds_debug_settle_waveform can try a non-inverting mode (e.g. GL16=5, or AUTO=257) to
-// see if it settles the wipe without the full-screen flash. Non-GC16 settles are issued PARTIAL.
-static uint32_t nds_settle_wf() { const char *v = nds_global_config_get("nds_debug_settle_waveform"); if (!v || !*v) return WF_GC16; int w = atoi(v); return w > 0 ? (uint32_t)w : WF_GC16; }
 
 // hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
 // waveforms are GL16/GLR16; the colour ones (GCC16/GLRC16/GCK16/GLKW16) and the GC16 flash /
@@ -314,10 +317,9 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     // the aliasing stays); GC16 clears and redraws every pixel at full quality and is on every panel.
     // It carries marker M. Elsewhere the strips are already the final render.
     if (plat->settle_flash) {
-        const uint32_t swf = nds_settle_wf();        // GC16 by default; nds_debug_settle_waveform overrides
         memcpy(v, orig, plat->size);
-        wr32(v, OFF_WAVEFORM, swf);
-        wr32(v, OFF_UPDMODE, swf == WF_GC16 ? UPD_FULL : UPD_PARTIAL);  // GC16 flashes (FULL); others non-flashing
+        wr32(v, OFF_WAVEFORM, WF_GC16);   // universal full-quality flash; clears the DU wipe
+        wr32(v, OFF_UPDMODE, UPD_FULL);
         wr32(v, OFF_MARKER, M);
         if (real_ioctl(fd, plat->send, v) >= 0) m_ok = true;
     }
@@ -521,7 +523,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s settle=%s cfa_skip=%d", plat->name, w, h,
                             wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
                             nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
-                            plat->settle_flash ? nds_wf_name(nds_settle_wf(), plat) : "none", (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                            plat->settle_flash ? "GC16" : "none", (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                 }
                 nds_do_sweep(fd, plat, u);
                 return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
@@ -640,15 +642,6 @@ static int nds_init() {
     NDS_LOG("startup: NickelDissolve " NH_VERSION);
     nds_log_firmware();
     nds_log_hwconfig();
-    nds_log_waveform();
-    // Debug: nds_debug_dump_flash:1 copies a wide window of raw flash around the waveform region to
-    // the onboard partition, so the .wbf can be pulled over USB and parsed offline (its exact on-flash
-    // offset varies by board). Off by default; only set when investigating waveform capabilities.
-    {
-        const char *dumpv = nds_global_config_get("nds_debug_dump_flash");
-        if (dumpv && atoi(dumpv) == 1)
-            nds_dump_flash(0x600000L, 0x600000L, "/mnt/onboard/nds_flash_dump.bin");
-    }
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.

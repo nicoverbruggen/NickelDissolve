@@ -56,6 +56,7 @@ void (*nds_touchcheckbox_ctor)(void *self, void *parent) = nullptr; // TouchChec
 // From nickeldissolve.cc: the live enable flag and the current effective state.
 extern "C" volatile int nds_runtime_animate;           // -1 = follow config, 0 = off, 1 = on
 extern "C" int nds_animations_enabled(void);           // current effective state (config or runtime)
+extern "C" int nds_device_supported(void);             // 1 = modern (hwtcon) device, officially supported
 
 static NdsBridge *g_nds_bridge = nullptr;
 
@@ -67,8 +68,9 @@ static NdsBridge *g_nds_bridge = nullptr;
 // no-Q_OBJECT QObject is enough here: we only override the inherited eventFilter virtual.
 class NdsRowSync : public QObject {
 public:
-    QLabel *mine; QWidget *ref;
-    NdsRowSync(QWidget *parent, QLabel *m, QWidget *r) : QObject(parent), mine(m), ref(r) {}
+    QLabel *mine; QWidget *ref; bool secondary;
+    NdsRowSync(QWidget *parent, QLabel *m, QWidget *r, bool sec = false)
+        : QObject(parent), mine(m), ref(r), secondary(sec) {}
     bool eventFilter(QObject *, QEvent *e) override {
         if (e->type() == QEvent::Show && mine && ref) {
             ref->ensurePolished();                       // make sure the native label is styled first
@@ -77,14 +79,24 @@ public:
             // Bake the padding AND font into our own stylesheet. Setting contentsMargins directly does
             // not survive a later re-polish (a plain QLabel matches no QSS padding rule and resets to
             // 0), whereas the widget's own stylesheet does. The font must be included because assigning
-            // a stylesheet otherwise resets the widget font to the large default. The extra top/bottom
-            // padding compensates for the taller cell RegularLabelVPadded reserves that a plain QLabel
-            // does not, so our row ends up the same height as its neighbours (eyeballed on device).
-            const int kExtraVPad = 5;
-            mine->setStyleSheet(QString("padding: %1px %2px %3px %4px; font-family: \"%5\"; font-size: %6px;")
-                                    .arg(m.top() + kExtraVPad).arg(m.right())
-                                    .arg(m.bottom() + kExtraVPad).arg(m.left())
-                                    .arg(fi.family()).arg(fi.pixelSize()));
+            // a stylesheet otherwise resets the widget font to the large default.
+            if (!secondary) {
+                // Main row label: the extra top/bottom padding compensates for the taller cell
+                // RegularLabelVPadded reserves that a plain QLabel does not, so our row ends up the
+                // same height as its neighbours (eyeballed on device).
+                const int kExtraVPad = 5;
+                mine->setStyleSheet(QString("padding: %1px %2px %3px %4px; font-family: \"%5\"; font-size: %6px;")
+                                        .arg(m.top() + kExtraVPad).arg(m.right())
+                                        .arg(m.bottom() + kExtraVPad).arg(m.left())
+                                        .arg(fi.family()).arg(fi.pixelSize()));
+            } else {
+                // Secondary description line: same left indent, a smaller font and tight top padding so
+                // it reads as a caption tucked under the row rather than a second full-height row.
+                const int fs = fi.pixelSize() > 0 ? (fi.pixelSize() * 82) / 100 : fi.pixelSize();
+                mine->setStyleSheet(QString("padding: 0px %1px %2px %3px; font-family: \"%4\"; font-size: %5px;")
+                                        .arg(m.right()).arg(m.bottom()).arg(m.left())
+                                        .arg(fi.family()).arg(fs));
+            }
             if (const QLabel *rl = qobject_cast<const QLabel *>(ref)) {
                 mine->setAlignment(rl->alignment());
                 mine->setIndent(rl->indent());   // native uses 0; a QLabel's -1 default adds a stray
@@ -270,27 +282,57 @@ void _nds_settings_ctor(void *self, void *parent) {
     // NdsRowSync installed below copies those onto this QLabel on the first Show.
     label->setText(QStringLiteral("Page turn animations:"));   // trailing colon like the native rows
 
-    void *cbMem = nds_alloc_touchcheckbox();
-    if (!cbMem) { row->deleteLater(); return; }
-    nds_touchcheckbox_ctor(cbMem, row);
-    // TouchCheckBox derives from QCheckBox with the QCheckBox subobject at offset 0, so we can treat
-    // the storage as a QCheckBox and use the public API for the text, state and toggled(bool) signal.
-    QCheckBox *checkbox = reinterpret_cast<QCheckBox *>(cbMem);
-    nds_copy_common_style(checkbox, tmplTgl);
-    checkbox->setText(QStringLiteral("On"));
-    checkbox->setChecked(nds_animations_enabled() != 0);
+    // Only the modern (hwtcon) devices are officially supported. On those we build the native "On"
+    // checkbox; on the others (i.MX/sunxi) we put an "Unsupported" label where the checkbox would be.
+    // The animation code still runs if forced from the config file, but the GUI doesn't offer a toggle
+    // where it isn't supported. Either way an explanatory caption is added below (see desc).
+    const bool supported = nds_device_supported() != 0;
 
-    if (!g_nds_bridge) g_nds_bridge = new NdsBridge(nullptr);
-    // Fail closed: a visible-but-dead row is worse than none, so tear it all down if it won't connect.
-    if (!QObject::connect(checkbox, SIGNAL(toggled(bool)), g_nds_bridge, SLOT(onAnimationToggled(bool)))) {
-        NDS_LOG("settings: toggled(bool) did not connect; omitting the row");
-        row->deleteLater();
-        return;
+    QWidget *rightWidget = nullptr;
+    if (supported) {
+        void *cbMem = nds_alloc_touchcheckbox();
+        if (!cbMem) { row->deleteLater(); return; }
+        nds_touchcheckbox_ctor(cbMem, row);
+        // TouchCheckBox derives from QCheckBox with the QCheckBox subobject at offset 0, so we can treat
+        // the storage as a QCheckBox and use the public API for the text, state and toggled(bool) signal.
+        QCheckBox *checkbox = reinterpret_cast<QCheckBox *>(cbMem);
+        nds_copy_common_style(checkbox, tmplTgl);
+        checkbox->setText(QStringLiteral("On"));
+        checkbox->setChecked(nds_animations_enabled() != 0);
+
+        if (!g_nds_bridge) g_nds_bridge = new NdsBridge(nullptr);
+        // Fail closed: a visible-but-dead row is worse than none, so tear it all down if it won't connect.
+        if (!QObject::connect(checkbox, SIGNAL(toggled(bool)), g_nds_bridge, SLOT(onAnimationToggled(bool)))) {
+            NDS_LOG("settings: toggled(bool) did not connect; omitting the row");
+            row->deleteLater();
+            return;
+        }
+        rightWidget = checkbox;
+    } else {
+        QLabel *unsup = new (std::nothrow) QLabel(row);
+        if (!unsup) { row->deleteLater(); return; }
+        nds_copy_common_style(unsup, tmplLabel);   // theme font, so it matches the row
+        unsup->setText(QStringLiteral("Unsupported"));
+        rightWidget = unsup;
     }
 
     line->addWidget(label, 1);
-    line->addWidget(checkbox, 0, Qt::AlignRight | Qt::AlignVCenter);
+    line->addWidget(rightWidget, 0, Qt::AlignRight | Qt::AlignVCenter);
     outer->addLayout(line);
+
+    // Explanatory caption, ALWAYS shown, below the row and above the divider: says why the animation is
+    // or isn't available on this hardware. Styled as a smaller sub-caption (NdsRowSync secondary mode).
+    QLabel *desc = new (std::nothrow) QLabel(row);
+    if (desc) {
+        nds_copy_common_style(desc, tmplLabel);
+        desc->setWordWrap(true);
+        desc->setTextFormat(Qt::PlainText);
+        desc->setText(supported
+            ? QStringLiteral("Your device's hardware revision supports page turn animations.")
+            : QStringLiteral("Your device's hardware revision is unfortunately too old, and page turn animations are not possible."));
+        outer->addWidget(desc);
+        desc->installEventFilter(new NdsRowSync(desc, desc, tmplLabel, /*secondary=*/true));
+    }
 
     if (QWidget *sep = nds_make_separator(row, tmplSep))
         outer->addWidget(sep);
@@ -301,6 +343,6 @@ void _nds_settings_ctor(void *self, void *parent) {
     // are applied by the style only then). The sync object parents itself to our label, so it dies with it.
     label->installEventFilter(new NdsRowSync(label, label, tmplLabel));
 
-    NDS_LOG("settings: inserted 'Page turn animations' row after '%s' (on=%d)",
-            anchorName, nds_animations_enabled() != 0);
+    NDS_LOG("settings: inserted 'Page turn animations' row after '%s' (supported=%d on=%d)",
+            anchorName, supported, nds_animations_enabled() != 0);
 }

@@ -5,6 +5,22 @@ file: each `## vX.Y` heading must exactly match a git tag.
 
 ## Unreleased
 
+### Changed
+
+- **Official device support is now the modern Kobo devices only: Clara BW, Clara Colour, and Libra
+  Colour.** The older i.MX devices (Libra 2, Clara 2E) and the large-panel Elipsa/Sage are no longer
+  officially supported. Their code is still in the mod, so you can install and run it on them if you
+  like, but it may not work well.
+
+### Added
+
+- **The Reading-settings entry now tells you whether your device is supported.** On a supported
+  device it keeps the on/off toggle and adds a line reading "Your device's hardware revision supports
+  page turn animations." On an unsupported device the toggle is replaced with an "Unsupported" label
+  and a line explaining that page turn animations are not possible on that hardware.
+- **The startup log now records the device's hardware revision** (from the NTX hardware-config block),
+  which helps diagnose support questions from a log alone.
+
 ## v0.3
 
 ### Added

@@ -1,7 +1,7 @@
 # NickelDissolve
 
 > [!WARNING]
-> **Initial, experimental release.** Officially supported on the Kobo **Libra Colour**, **Clara Colour**, and **Clara BW**. On i.MX-based devices (Libra 2, Clara 2E) it **⚠️ may work depending on the board revision**, because only later revisions support the fast, high-quality page-turn refresh it relies on. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
+> **Initial, experimental release.** Officially supported on the Kobo **Libra Colour**, **Clara Colour**, and **Clara BW**. Other devices (including the older Libra 2 and Clara 2E) are **⚠️ not officially supported**: the mod still installs and can run on them, but it may not work, and its settings entry shows it as unsupported. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
 
 NickelDissolve gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
 
@@ -26,15 +26,15 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 | Kobo Libra Colour | ✅ Officially supported, tested (including colour-page handling) |
 | Kobo Clara Colour | ✅ Officially supported (same hardware family as the Libra Colour) |
 | Kobo Clara BW | ✅ Officially supported, tested (black-and-white) |
-| Kobo Libra 2 | ⚠️ May work (depends on device revision) |
-| Kobo Clara 2E | ⚠️ May work (depends on device revision) |
-| Kobo Elipsa 2E | ⚠️ May work (not yet verified) |
-| Kobo Elipsa / Sage | ⚠️ Works, but too slow to recommend; off unless you opt in |
+| Kobo Libra 2 | ⚠️ Not officially supported; may work if you install it |
+| Kobo Clara 2E | ⚠️ Not officially supported; may work if you install it |
+| Kobo Elipsa 2E | ⚠️ Not officially supported (modern MediaTek family, likely works; not verified) |
+| Kobo Elipsa / Sage | ⚠️ Not officially supported; slow on these large panels |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
 **Officially supported: the Kobo Libra Colour, Clara Colour, and Clara BW.** On these the animation is reliable.
 
-**A note on i.MX devices (Libra 2, Clara 2E):** these shipped in several board revisions, and only the later ones support the fast, high-quality page-turn refresh the animation relies on. On an older revision it can look slow or fall back to full-screen flashes. Working out which revisions can handle it is still in progress. If you have one, a page-turn log on **[issue #1](https://github.com/nicoverbruggen/NickelDissolve/issues/1)** helps a lot.
+**Other devices** can still install and run the mod, but they are not officially supported and may not work. On an unsupported device the "Page turn animations" entry in the Reading settings shows an "Unsupported" note instead of the on/off switch. If you want to try it anyway, the config file still works.
 
 On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.
 
