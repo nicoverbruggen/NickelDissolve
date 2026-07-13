@@ -93,13 +93,6 @@ struct nds_platform {
                                // reading waveform for every band is too slow (i.MX), use a fast wipe
                                // waveform (DU) here and set settle_native below; the fast bands are then
                                // just throwaway motion. nds_debug_strip_waveform overrides per device.
-    bool          settle_flash;// after the bands, do one full-screen GC16 flash to settle the page at
-                               // full quality and carry marker M. true where the bands are a fast
-                               // throwaway DU wipe (i.MX). A flashless reissue does NOT clean a DU wipe:
-                               // it skips the pixels DU already drove to pure black/white, so the grey
-                               // (anti-aliased) edges never render and the text stays aliased. GC16
-                               // clears and redraws every pixel, and is universal. false on hwtcon,
-                               // where the bands (GLR16) already are the final full-quality render.
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
@@ -107,14 +100,15 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0, false },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
-    // No submission-wait to pace strips, so default to ~30 ms/strip. The native reading waveform is
-    // too slow to reuse for every band, so draw a fast throwaway DU (1) wipe, then settle_flash does
-    // one full-screen GC16 flash to render the final page at full quality. Keeps the wipe quick and the
-    // settled page clean, on any i.MX panel revision — DU and GC16 are supported on every panel.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 1, true },
+    // No submission-wait to pace strips, so default to ~30 ms/strip. def_strip_wf = 0: the strips REUSE
+    // the turn's own waveform, i.e. whatever high-quality greyscale mode Nickel picked for the page
+    // (REAGL on panels that support it), so each band is a full-quality, flashless render and we use
+    // the panel's best refresh automatically without hardcoding one (this is the v0.3 behaviour). Where
+    // reusing REAGL per band is too slow, nds_debug_strip_waveform:1 forces the faster DU wipe.
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 0 },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -131,6 +125,12 @@ static inline void     wr32(uint8_t *b, unsigned off, uint32_t v) { memcpy(b + o
 static int  (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
 static void (*real_nextPageWithTimer)(void *self) = nullptr;
 static void (*real_prevPageWithTimer)(void *self) = nullptr;
+
+// Unsupported-device alert + settings bridge (implemented in settingsui.cc, which has Qt). The toast
+// API pointers below are resolved by the dlsym table; kept as void* so this file needn't include Qt.
+extern "C" void nds_settings_init(void);      // create the settings QObject on the main thread (from init)
+extern "C" void nds_alert_unsupported(void);  // show the "device not supported" toast (thread-safe)
+extern "C" { void *nds_mwc_shared_fn = nullptr; void *nds_mwc_toast_fn = nullptr; }
 
 static bool nds_safety_disabled = false;
 // Verbose tracing switch (declared in util.h, used by NDS_DBG + the hot-path traces). Published
@@ -151,6 +151,11 @@ static volatile long nds_flash_ts  = 0;       // time() of that flash (staleness
 static volatile int  nds_first_turn_pending = 0;  // set when a book-open settle fires; the next turn is the first turn, whose forced GC16 we animate instead of flashing
 static uint32_t nds_ephemeral_marker = 0xF0000000u;   // markers for non-final strips (never collide with Nickel)
 static const struct nds_platform *nds_active = nullptr;   // detected from the first update ioctl (for logging)
+// Set once a page turn proves this i.MX board reads with a non-REAGL (slow) waveform, i.e. it can't do
+// the fast high-quality refresh the animation needs. Persisted to the config as determined_unsupported
+// so the mod stops trying on future boots and the settings mark the device Unsupported. Read back at
+// startup. hwtcon/REAGL boards never set it.
+static volatile bool nds_determined_unsupported = false;
 
 static long nds_now() { return (long)time(nullptr); }
 
@@ -169,13 +174,21 @@ extern "C" { volatile int nds_runtime_animate = -1; }
 static bool nds_off()         { if (nds_runtime_animate == 0) return true; if (nds_runtime_animate == 1) return false; return nds_mode_is("off"); }
 // Current effective on/off, for the toggle's initial state (settingsui.cc).
 extern "C" int nds_animations_enabled(void) { return !nds_off(); }
-// Whether the animation is OFFICIALLY supported on this device: the modern MTK/hwtcon family (Clara
-// BW/Colour, Libra Colour). Detected from the e-ink driver seen at runtime (nds_active is set the
-// first time a page renders through the hwtcon/mxcfb update ioctl, which happens long before the
-// Reading-settings panel can open). The i.MX (mxcfb) and sunxi families still run the animation if
-// enabled, but are not officially supported, so the settings UI shows them an "Unsupported" note
-// instead of the toggle. Unknown / not-yet-detected also reads as unsupported.
-extern "C" int nds_device_supported(void) { return (nds_active && !strcmp(nds_active->name, "hwtcon")) ? 1 : 0; }
+// The device's support tier, for the settings UI. Detected from the e-ink driver seen at runtime
+// (nds_active is set the first time a page renders through the hwtcon/mxcfb update ioctl, long before
+// the Reading-settings panel can open):
+//   2 = officially supported  the modern MTK/hwtcon family (Clara BW/Colour, Libra Colour);
+//   1 = may work              i.MX (mxcfb, Libra 2 / Clara 2E) that has NOT yet been proven bad: the
+//                             animation is attempted best-effort (only REAGL boards actually animate);
+//   0 = not supported         an i.MX board proven to read with a non-REAGL waveform (determined_unsupported),
+//                             or sunxi (Elipsa/Sage) / an unrecognised / not-yet-detected platform.
+extern "C" int nds_device_support(void) {
+    if (nds_active && !strcmp(nds_active->name, "hwtcon")) return 2;
+    if (nds_active && !strcmp(nds_active->name, "mxcfb"))
+        return (nds_determined_unsupported ||
+                nds_global_config_bool("determined_unsupported", false)) ? 0 : 1;
+    return 0;
+}
 static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 // sunxi (Elipsa/Sage) is functional but NOT recommended (huge panels, slow bands), so it never
 // sweeps by default: it requires nds_mode:sweep to be set explicitly in the config.
@@ -221,6 +234,21 @@ static bool nds_animate_first_turn() { return nds_global_config_bool("nds_animat
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
 
+// Called once, from the ioctl hook, when a page turn proves this i.MX board reads with a non-REAGL
+// (slow) waveform, i.e. it can't do the fast high-quality refresh the animation needs. Records it in
+// memory and persists determined_unsupported:1 to the config so it survives reboots (and the settings
+// then mark the device Unsupported), then pops a one-time on-screen alert. Guarded so it runs once.
+static void nds_mark_determined_unsupported() {
+    if (nds_determined_unsupported)
+        return;
+    nds_determined_unsupported = true;
+    NDS_LOG("determined: i.MX board reads with a non-REAGL waveform; unsupported, animation disabled");
+    mkdir(NDS_CONFIG_DIR, 0755);
+    FILE *f = fopen(NDS_CONFIG_DIR "/config", "a");   // append; a leading newline keeps it on its own line
+    if (f) { fprintf(f, "\ndetermined_unsupported:1\n"); fclose(f); }
+    nds_alert_unsupported();
+}
+
 // hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
 // waveforms are GL16/GLR16; the colour ones (GCC16/GLRC16/GCK16/GLKW16) and the GC16 flash /
 // A2·DU menu modes are everything else.
@@ -234,14 +262,25 @@ static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debu
 // (GCC16=10 / GLRC16=11 / GCK16=8 / GLKW16=9) for non-grey content, a greyscale one (GLR16=4,
 // GL16=3) for text. So a colour page never reaches us as GL16/GLR16 — gating on the waveform
 // skips colour pages, GC16 flashes, AUTO(257), and A2/DU menu updates in a single test, and
-// (unlike the always-set CFA flag field) it is genuinely content-driven. On a mono panel
-// (mxcfb, no CFA) there is no colour to avoid, so sweep any non-flash waveform there.
-// nds_debug_sweep_any_waveform bypasses the allowlist (sweep anything non-GC16) for experiments.
+// (unlike the always-set CFA flag field) it is genuinely content-driven. On a mono panel (mxcfb, no
+// CFA) we sweep ONLY the fast Regal reading waveform REAGL(6) (i.MX numbering, NOT the WF_* MTK ids).
+// This is both the "is it a reading turn" gate AND the "is it the good board" gate: on-device logs show
+// one Libra 2 reads with REAGL(6) (fast, clean) and an older board with GLKW16(10) (slow, ~5 s/turn);
+// GLKW16 and the other non-REAGL reading modes render band-by-band too slowly to be worth it, so we
+// don't animate them at all — a turn with such a waveform instead marks the board unsupported (see the
+// SKIP branch). Menus/toolbars (AUTO/DU) and flashes (GC16) are rejected here as before, so nothing but
+// a genuine REAGL reading turn animates. nds_debug_sweep_any_waveform bypasses it (sweep non-GC16).
 static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
     if (nds_global_config_bool("nds_debug_sweep_any_waveform", false)) return wf != WF_GC16;
-    if (plat->cfa_field == 0) return wf != WF_GC16;          // mono panel: no colour to skip
-    return wf == WF_GL16 || wf == WF_GLR16;                  // Kaleido-capable: greyscale reading only
+    if (plat->cfa_field == 0) {                             // mono (i.MX): only REAGL(6), the fast refresh
+        if (nds_global_config_bool("nds_debug_force_unsupported", false)) return false;  // test the unsupported path on any board
+        return wf == 6u;
+    }
+    return wf == WF_GL16 || wf == WF_GLR16;                 // Kaleido-capable: greyscale reading only
 }
+// A genuine i.MX reading turn that ISN'T REAGL: a flashless greyscale reading waveform other than
+// REAGL(6). Seeing one proves the board can't do the fast refresh (GL16/REAGLD/GLKW16 in i.MX ids).
+static inline bool nds_mxcfb_slow_reading_wf(uint32_t wf) { return wf == 5u || wf == 7u || wf == 10u; }
 // i.MX (mxcfb) and MTK (hwtcon) number their waveform modes differently, so the name is
 // platform-dependent. i.MX numbering is from koreader's mxcfb-kobo.h; the WF_* constants below are
 // the MTK numbering. i.MX mono panels carry cfa_field == 0, which selects the right table.
@@ -295,9 +334,9 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
         wr32(v, OFF_UPDMODE, UPD_PARTIAL);
         if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
         if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);  // no per-region CFA seam
-        // When settle_flash does a full GC16 settle below, NO strip carries Nickel's marker M — the
-        // settle does; otherwise the last strip carries it (the strips are the final render).
-        uint32_t mk = (last && !plat->settle_flash) ? M : (nds_ephemeral_marker + (uint32_t)k);
+        // The last strip carries Nickel's marker M (the strips are the final render); the earlier
+        // strips get throwaway ephemeral markers.
+        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
         wr32(v, OFF_MARKER, mk);
 
         if (real_ioctl(fd, plat->send, v) < 0) continue;
@@ -311,17 +350,6 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
             real_ioctl(fd, plat->wait_sub, &wm);
         }                                            // mxcfb: no wait needed (no MDP merge)
         if (delay > 0 && !last) usleep((useconds_t)delay);
-    }
-    // Settle: where the strips were a fast throwaway DU wipe (i.MX), finish with one full-screen GC16
-    // flash. A flashless reissue can't clean a DU wipe (it skips the pixels DU drove to black/white, so
-    // the aliasing stays); GC16 clears and redraws every pixel at full quality and is on every panel.
-    // It carries marker M. Elsewhere the strips are already the final render.
-    if (plat->settle_flash) {
-        memcpy(v, orig, plat->size);
-        wr32(v, OFF_WAVEFORM, WF_GC16);   // universal full-quality flash; clears the DU wipe
-        wr32(v, OFF_UPDMODE, UPD_FULL);
-        wr32(v, OFF_MARKER, M);
-        if (real_ioctl(fd, plat->send, v) >= 0) m_ok = true;
     }
     // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
     if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
@@ -429,7 +457,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         if (!(f & plat->cfa_skip)) wr32(m, plat->flags_off, f | plat->cfa_skip);
     }
 
-    if (plat && argp && real_ioctl && !nds_safety_disabled && nds_sweep_mode()) {
+    if (plat && argp && real_ioctl && !nds_safety_disabled && !nds_determined_unsupported && nds_sweep_mode()) {
         // Expire a stale pending-turn so we never sweep an unrelated later full-screen update.
         if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
 
@@ -502,6 +530,13 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 // update larger than our buffer: leave it as the original GC16 flash (passthrough)
             } else if (is_flash || !nds_wf_sweepable(plat, wf)) {
                 nds_first_turn_pending = 0;
+                // i.MX: we're past the gesture gate on a full-screen, non-flash render, so this IS a
+                // reading turn — and its waveform isn't REAGL. A non-REAGL reading waveform proves the
+                // board can't do the fast refresh, so mark it unsupported (records it, turns the
+                // animation off, alerts the user), once.
+                if (!is_flash && plat->cfa_field == 0 &&
+                    (nds_mxcfb_slow_reading_wf(wf) || nds_global_config_bool("nds_debug_force_unsupported", false)))
+                    nds_mark_determined_unsupported();
                 static int cskip = 0;
                 if (nds_verbose_enabled && cskip < 40 && !is_flash) { cskip++;
                     NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
@@ -520,10 +555,10 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
                 if (nds_verbose_enabled && swept < 40) { swept++;
-                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s settle=%s cfa_skip=%d", plat->name, w, h,
+                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
                             wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
                             nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
-                            plat->settle_flash ? "GC16" : "none", (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                            (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                 }
                 nds_do_sweep(fd, plat, u);
                 return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
@@ -642,6 +677,15 @@ static int nds_init() {
     NDS_LOG("startup: NickelDissolve " NH_VERSION);
     nds_log_firmware();
     nds_log_hwconfig();
+    // If a previous boot already proved this i.MX board can't do the fast refresh, honour it now:
+    // the animation stays off and the settings show Unsupported (no re-detection, no repeat alert).
+    if (nds_global_config_bool("determined_unsupported", false)) {
+        nds_determined_unsupported = true;
+        NDS_LOG("startup: determined_unsupported set; page-turn animation disabled on this device");
+    }
+    // Create the settings QObject on the main thread now (init runs on it), so the unsupported alert
+    // has something to marshal to even if the Reading-settings page is never opened.
+    nds_settings_init();
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
@@ -701,6 +745,12 @@ static struct nh_dlsym NickelDissolveDlsym[] = {
     //libnickel 4.6.9960 * _ZN13TouchCheckBoxC1EP7QWidget
     { .name = "_ZN13TouchCheckBoxC1EP7QWidget", .out = nh_symoutptr(nds_touchcheckbox_ctor),
       .desc = "TouchCheckBox ctor (native Reading-settings checkbox)", .optional = true },
+    //libnickel 4.6.9960 * _ZN20MainWindowController14sharedInstanceEv
+    { .name = "_ZN20MainWindowController14sharedInstanceEv", .out = nh_symoutptr(nds_mwc_shared_fn),
+      .desc = "MainWindowController::sharedInstance (for the unsupported-device alert)", .optional = true },
+    //libnickel 4.6.9960 * _ZN20MainWindowController5toastERK7QStringS2_i
+    { .name = "_ZN20MainWindowController5toastERK7QStringS2_i", .out = nh_symoutptr(nds_mwc_toast_fn),
+      .desc = "MainWindowController::toast (unsupported-device alert)", .optional = true },
     {0},
 };
 

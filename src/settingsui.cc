@@ -56,7 +56,10 @@ void (*nds_touchcheckbox_ctor)(void *self, void *parent) = nullptr; // TouchChec
 // From nickeldissolve.cc: the live enable flag and the current effective state.
 extern "C" volatile int nds_runtime_animate;           // -1 = follow config, 0 = off, 1 = on
 extern "C" int nds_animations_enabled(void);           // current effective state (config or runtime)
-extern "C" int nds_device_supported(void);             // 1 = modern (hwtcon) device, officially supported
+extern "C" int nds_device_support(void);               // 2 = supported (hwtcon), 1 = may work (mxcfb), 0 = not
+// MainWindowController toast API, resolved by the dlsym table in nickeldissolve.cc (kept as void* there
+// so that file needs no Qt); cast to the real signatures here. Both .optional, so absence = no toast.
+extern "C" { extern void *nds_mwc_shared_fn; extern void *nds_mwc_toast_fn; }
 
 static NdsBridge *g_nds_bridge = nullptr;
 
@@ -188,6 +191,36 @@ void NdsBridge::onAnimationToggled(bool on) {
     NDS_LOG("settings: page-turn animations toggled %s", on ? "on" : "off");
 }
 
+// Show the one-time "device not supported" toast. Runs on the main thread (invoked via a queued
+// connection from the ioctl hook). Fail-safe: if the toast API wasn't resolved on this firmware, or the
+// controller isn't up yet, it simply does nothing.
+void NdsBridge::showUnsupportedAlert() {
+    if (!nds_mwc_shared_fn || !nds_mwc_toast_fn)
+        return;
+    typedef void *(*mwc_shared_t)();
+    typedef void (*mwc_toast_t)(void *, const QString &, const QString &, int);
+    void *mw = ((mwc_shared_t)nds_mwc_shared_fn)();
+    if (!mw)
+        return;
+    ((mwc_toast_t)nds_mwc_toast_fn)(mw,
+        QStringLiteral("Page turn animations turned off"),
+        QStringLiteral("Your device's hardware revision is not supported."), 5000);
+}
+
+// Create the bridge QObject on the main thread (nds_init runs there), so the unsupported alert has a
+// main-thread object to marshal to even before the Reading-settings page is ever opened.
+extern "C" void nds_settings_init(void) {
+    if (!g_nds_bridge)
+        g_nds_bridge = new (std::nothrow) NdsBridge(nullptr);
+}
+
+// Trigger the unsupported alert. Thread-safe: posts to the bridge's (main) thread, so it is safe to
+// call from the ioctl hook whatever thread that runs on. No-op if the bridge doesn't exist.
+extern "C" void nds_alert_unsupported(void) {
+    if (g_nds_bridge)
+        QMetaObject::invokeMethod(g_nds_bridge, "showUnsupportedAlert", Qt::QueuedConnection);
+}
+
 // Build a divider that matches the native row separators. Each native separator is a plain QWidget
 // drawn as a line by the *view's* stylesheet, which lists the separators by objectName ID selector
 // (#darkModeSeparator, #showAdobePageNumbersSeparator, ...) and gives them a fixed height + background.
@@ -282,14 +315,15 @@ void _nds_settings_ctor(void *self, void *parent) {
     // NdsRowSync installed below copies those onto this QLabel on the first Show.
     label->setText(QStringLiteral("Page turn animations:"));   // trailing colon like the native rows
 
-    // Only the modern (hwtcon) devices are officially supported. On those we build the native "On"
-    // checkbox; on the others (i.MX/sunxi) we put an "Unsupported" label where the checkbox would be.
-    // The animation code still runs if forced from the config file, but the GUI doesn't offer a toggle
-    // where it isn't supported. Either way an explanatory caption is added below (see desc).
-    const bool supported = nds_device_supported() != 0;
+    // Three support tiers (nds_device_support): 2 = officially supported (modern hwtcon), 1 = may work
+    // (i.MX/mxcfb: runs, but some revisions can't do it well), 0 = not supported (sunxi / unknown).
+    // Tiers 2 and 1 get the native "On" toggle; tier 0 gets an "Unsupported" label in its place. A
+    // caption is added below for tiers 1 and 0; tier 2 shows no caption, a clean row like before.
+    const int support = nds_device_support();
+    const bool showToggle = support >= 1;
 
     QWidget *rightWidget = nullptr;
-    if (supported) {
+    if (showToggle) {
         void *cbMem = nds_alloc_touchcheckbox();
         if (!cbMem) { row->deleteLater(); return; }
         nds_touchcheckbox_ctor(cbMem, row);
@@ -320,18 +354,22 @@ void _nds_settings_ctor(void *self, void *parent) {
     line->addWidget(rightWidget, 0, Qt::AlignRight | Qt::AlignVCenter);
     outer->addLayout(line);
 
-    // Explanatory caption, ALWAYS shown, below the row and above the divider: says why the animation is
-    // or isn't available on this hardware. Styled as a smaller sub-caption (NdsRowSync secondary mode).
-    QLabel *desc = new (std::nothrow) QLabel(row);
-    if (desc) {
-        nds_copy_common_style(desc, tmplLabel);
-        desc->setWordWrap(true);
-        desc->setTextFormat(Qt::PlainText);
-        desc->setText(supported
-            ? QStringLiteral("Your device's hardware revision supports page turn animations.")
-            : QStringLiteral("Your device's hardware revision is unfortunately too old, and page turn animations are not possible."));
-        outer->addWidget(desc);
-        desc->installEventFilter(new NdsRowSync(desc, desc, tmplLabel, /*secondary=*/true));
+    // Caption below the row: none on a fully supported device (a clean row, like v0.3); a caution on a
+    // "may work" device; a "not available" note on an unsupported one. Styled as a smaller sub-caption.
+    const char *caption =
+        support == 1 ? "Your device may not be supported. Depending on its hardware revision, page turn animations might not work correctly."
+      : support == 0 ? "Your device is not supported, so page turn animations are not available."
+                     : nullptr;
+    if (caption) {
+        QLabel *desc = new (std::nothrow) QLabel(row);
+        if (desc) {
+            nds_copy_common_style(desc, tmplLabel);
+            desc->setWordWrap(true);
+            desc->setTextFormat(Qt::PlainText);
+            desc->setText(QString::fromUtf8(caption));
+            outer->addWidget(desc);
+            desc->installEventFilter(new NdsRowSync(desc, desc, tmplLabel, /*secondary=*/true));
+        }
     }
 
     if (QWidget *sep = nds_make_separator(row, tmplSep))
@@ -343,6 +381,6 @@ void _nds_settings_ctor(void *self, void *parent) {
     // are applied by the style only then). The sync object parents itself to our label, so it dies with it.
     label->installEventFilter(new NdsRowSync(label, label, tmplLabel));
 
-    NDS_LOG("settings: inserted 'Page turn animations' row after '%s' (supported=%d on=%d)",
-            anchorName, supported, nds_animations_enabled() != 0);
+    NDS_LOG("settings: inserted 'Page turn animations' row after '%s' (support=%d on=%d)",
+            anchorName, support, nds_animations_enabled() != 0);
 }

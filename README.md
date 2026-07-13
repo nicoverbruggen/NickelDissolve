@@ -34,7 +34,7 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 
 **Officially supported: the Kobo Libra Colour, Clara Colour, and Clara BW.** On these the animation is reliable.
 
-**Other devices** can still install and run the mod, but they are not officially supported and may not work. On an unsupported device the "Page turn animations" entry in the Reading settings shows an "Unsupported" note instead of the on/off switch. If you want to try it anyway, the config file still works.
+**Other devices** can still install and run the mod, but they are not officially supported. On i.MX devices (Libra 2, Clara 2E) the "Page turn animations" entry in the Reading settings keeps the on/off switch but adds a note that it may not work; on devices that aren't supported at all, the switch is replaced with an "Unsupported" note. If you want to try it anyway, the config file still works.
 
 On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.
 
