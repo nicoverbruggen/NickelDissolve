@@ -88,6 +88,12 @@ struct nds_platform {
     uint32_t      read_wf;     // the flashless greyscale reading waveform for this platform, used
                                // when converting a forced-GC16 first-turn refresh into an animated
                                // sweep (hwtcon: GLR16=4; mxcfb: REAGL=6)
+    uint32_t      def_strip_wf;// waveform used to draw the swept bands when nds_debug_strip_waveform
+                               // is unset. 0 = reuse the update's own waveform (hwtcon: GLR16 is fast
+                               // AND good, so reuse it). On i.MX the reading waveform is slow and was
+                               // being reused for every band, so each turn crawled; default to a fast
+                               // waveform (DU=1) for the bands there. DU is 2-level, so the page
+                               // settles high-contrast (fine for text); override per device if needed.
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
@@ -95,12 +101,12 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4 },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
-    // No submission-wait to pace strips, so default to ~30 ms/strip: the slower REAGL bands need the
-    // room to settle before the next one (tuned on a Libra 2), or the wipe is instant / steppy.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6 },
+    // No submission-wait to pace strips, so default to ~30 ms/strip, and draw the bands with the fast
+    // DU waveform (1) instead of reusing the slow reading waveform (which made each turn crawl).
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 1 },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -240,7 +246,8 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     const uint32_t W  = rd32(orig, OFF_WIDTH), H = rd32(orig, OFF_HEIGHT);
     const int N = nds_strips();
     const uint32_t sw = W / (uint32_t)N;
-    const uint32_t wf_override = nds_strip_wf();     // 0 = keep original
+    uint32_t wf_override = nds_strip_wf();            // config override wins; 0 = use platform default
+    if (wf_override == 0) wf_override = plat->def_strip_wf;   // per-platform fast band waveform (0 = reuse)
     const int delay = nds_delay_us((int)plat->def_delay_us);   // config wins; else per-platform default
     const bool want_complete = nds_wait_complete();
     bool rtl = nds_rtl();
@@ -357,7 +364,15 @@ static bool nds_gesture_animate(bool armed, uint32_t width) {
     if (!nds_animate_tap()) return false;
     if (!nds_gesture_filter_installed()) return true;   // legacy: any full-screen page render
     if (!fresh || g != NDS_GESTURE_TAP) return false;   // not caused by a recent tap
-    if (tap_x >= 0 && width > 0) nds_turn_dir = ((uint32_t)tap_x >= width / 2u) ? 0 : 1;
+    // A center tap raises the reading menu; it does not turn the page. Kobo's turn zones are the left
+    // and right of the screen, the middle is the menu. Animating the menu's full-screen redraw is the
+    // "toolbar/menu sweeps in" bug on i.MX (where any full-screen non-flash update can be swept). So
+    // only animate taps that land in the outer turn zones, and take the direction from the side.
+    if (tap_x >= 0 && width > 0) {
+        const uint32_t x = (uint32_t)tap_x;
+        if (x > width / 3u && x < (width * 2u) / 3u) return false;   // center third = menu, not a turn
+        nds_turn_dir = (x >= width / 2u) ? 0 : 1;
+    }
     return true;
 }
 
@@ -466,8 +481,9 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
                 if (nds_verbose_enabled && swept < 40) { swept++;
-                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                            wf, nds_wf_name(wf), nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
+                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
+                            wf, nds_wf_name(wf), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
+                            nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                             (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                 }
                 nds_do_sweep(fd, plat, u);
