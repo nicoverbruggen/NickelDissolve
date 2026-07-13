@@ -88,12 +88,18 @@ struct nds_platform {
     uint32_t      read_wf;     // the flashless greyscale reading waveform for this platform, used
                                // when converting a forced-GC16 first-turn refresh into an animated
                                // sweep (hwtcon: GLR16=4; mxcfb: REAGL=6)
-    uint32_t      def_strip_wf;// waveform used to draw the swept bands when nds_debug_strip_waveform
-                               // is unset. 0 = reuse the update's own waveform (hwtcon: GLR16 is fast
-                               // AND good, so reuse it). On i.MX the reading waveform is slow and was
-                               // being reused for every band, so each turn crawled; default to a fast
-                               // waveform (DU=1) for the bands there. DU is 2-level, so the page
-                               // settles high-contrast (fine for text); override per device if needed.
+    uint32_t      def_strip_wf;// waveform to draw the swept bands with when nds_debug_strip_waveform is
+                               // unset. 0 = reuse the update's own waveform. Where reusing the native
+                               // reading waveform for every band is too slow (i.MX), use a fast wipe
+                               // waveform (DU) here and set settle_native below; the fast bands are then
+                               // just throwaway motion. nds_debug_strip_waveform overrides per device.
+    bool          settle_flash;// after the bands, do one full-screen GC16 flash to settle the page at
+                               // full quality and carry marker M. true where the bands are a fast
+                               // throwaway DU wipe (i.MX). A flashless reissue does NOT clean a DU wipe:
+                               // it skips the pixels DU already drove to pure black/white, so the grey
+                               // (anti-aliased) edges never render and the text stays aliased. GC16
+                               // clears and redraws every pixel, and is universal. false on hwtcon,
+                               // where the bands (GLR16) already are the final full-quality render.
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
@@ -101,12 +107,14 @@ static const struct nds_platform NDS_PLATFORMS[] = {
     // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0 },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0, false },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
-    // No submission-wait to pace strips, so default to ~30 ms/strip, and draw the bands with the fast
-    // DU waveform (1) instead of reusing the slow reading waveform (which made each turn crawl).
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 1 },
+    // No submission-wait to pace strips, so default to ~30 ms/strip. The native reading waveform is
+    // too slow to reuse for every band, so draw a fast throwaway DU (1) wipe, then settle_flash does
+    // one full-screen GC16 flash to render the final page at full quality. Keeps the wipe quick and the
+    // settled page clean, on any i.MX panel revision — DU and GC16 are supported on every panel.
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 1, true },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -205,6 +213,10 @@ static bool nds_animate_first_turn() { return nds_global_config_bool("nds_animat
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
+// The settle waveform (mxcfb: the full-quality pass after the fast DU wipe). Default GC16 = a clean
+// full flash. nds_debug_settle_waveform can try a non-inverting mode (e.g. GL16=5, or AUTO=257) to
+// see if it settles the wipe without the full-screen flash. Non-GC16 settles are issued PARTIAL.
+static uint32_t nds_settle_wf() { const char *v = nds_global_config_get("nds_debug_settle_waveform"); if (!v || !*v) return WF_GC16; int w = atoi(v); return w > 0 ? (uint32_t)w : WF_GC16; }
 
 // hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
 // waveforms are GL16/GLR16; the colour ones (GCC16/GLRC16/GCK16/GLKW16) and the GC16 flash /
@@ -227,8 +239,19 @@ static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
     if (plat->cfa_field == 0) return wf != WF_GC16;          // mono panel: no colour to skip
     return wf == WF_GL16 || wf == WF_GLR16;                  // Kaleido-capable: greyscale reading only
 }
-static const char *nds_wf_name(uint32_t wf) {
-    switch (wf) {
+// i.MX (mxcfb) and MTK (hwtcon) number their waveform modes differently, so the name is
+// platform-dependent. i.MX numbering is from koreader's mxcfb-kobo.h; the WF_* constants below are
+// the MTK numbering. i.MX mono panels carry cfa_field == 0, which selects the right table.
+static const char *nds_wf_name(uint32_t wf, const struct nds_platform *plat) {
+    if (plat && plat->cfa_field == 0u) {   // i.MX / mxcfb
+        switch (wf) {
+            case 0:  return "INIT";  case 1: return "DU";    case 2:  return "GC16";   case 3:   return "GC4";
+            case 4:  return "A2";    case 5: return "GL16";  case 6:  return "REAGL";  case 7:   return "REAGLD";
+            case 8:  return "DU4";   case 9: return "GCK16"; case 10: return "GLKW16"; case 257: return "AUTO";
+            default: return "?";
+        }
+    }
+    switch (wf) {   // MTK / hwtcon
         case 0: return "INIT"; case WF_DU: return "DU"; case WF_GC16: return "GC16";
         case WF_GL16: return "GL16"; case WF_GLR16: return "GLR16"; case 6: return "REAGL";
         case 8: return "GCK16"; case 9: return "GLKW16"; case WF_GCC16: return "GCC16";
@@ -269,7 +292,9 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
         wr32(v, OFF_UPDMODE, UPD_PARTIAL);
         if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
         if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);  // no per-region CFA seam
-        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);   // last strip carries Nickel's marker M
+        // When settle_flash does a full GC16 settle below, NO strip carries Nickel's marker M — the
+        // settle does; otherwise the last strip carries it (the strips are the final render).
+        uint32_t mk = (last && !plat->settle_flash) ? M : (nds_ephemeral_marker + (uint32_t)k);
         wr32(v, OFF_MARKER, mk);
 
         if (real_ioctl(fd, plat->send, v) < 0) continue;
@@ -283,6 +308,18 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
             real_ioctl(fd, plat->wait_sub, &wm);
         }                                            // mxcfb: no wait needed (no MDP merge)
         if (delay > 0 && !last) usleep((useconds_t)delay);
+    }
+    // Settle: where the strips were a fast throwaway DU wipe (i.MX), finish with one full-screen GC16
+    // flash. A flashless reissue can't clean a DU wipe (it skips the pixels DU drove to black/white, so
+    // the aliasing stays); GC16 clears and redraws every pixel at full quality and is on every panel.
+    // It carries marker M. Elsewhere the strips are already the final render.
+    if (plat->settle_flash) {
+        const uint32_t swf = nds_settle_wf();        // GC16 by default; nds_debug_settle_waveform overrides
+        memcpy(v, orig, plat->size);
+        wr32(v, OFF_WAVEFORM, swf);
+        wr32(v, OFF_UPDMODE, swf == WF_GC16 ? UPD_FULL : UPD_PARTIAL);  // GC16 flashes (FULL); others non-flashing
+        wr32(v, OFF_MARKER, M);
+        if (real_ioctl(fd, plat->send, v) >= 0) m_ok = true;
     }
     // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
     if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
@@ -456,7 +493,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                     if (nds_verbose_enabled)
                         NDS_LOG("FIRST-TURN [%s] %ux%u armed=%d reader_open=%d: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
-                                plat->name, w, h, armed, nds_reader_is_open(), plat->read_wf, nds_wf_name(plat->read_wf), rtl ? "R->L" : "L->R");
+                                plat->name, w, h, armed, nds_reader_is_open(), plat->read_wf, nds_wf_name(plat->read_wf, plat), rtl ? "R->L" : "L->R");
                     nds_do_sweep(fd, plat, conv);
                     return 0;
                 }
@@ -466,7 +503,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 static int cskip = 0;
                 if (nds_verbose_enabled && cskip < 40 && !is_flash) { cskip++;
                     NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
-                            plat->name, w, h, wf, nds_wf_name(wf), md == UPD_FULL ? "FULL" : "PARTIAL",
+                            plat->name, w, h, wf, nds_wf_name(wf, plat), md == UPD_FULL ? "FULL" : "PARTIAL",
                             nds_dither(u, plat), rd32(u, plat->flags_off));
                 }
             } else if (settle) {
@@ -474,17 +511,17 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 static int nset = 0;
                 if (nds_verbose_enabled && nset < 40) { nset++;
                     NDS_LOG("SETTLE [%s] %ux%u wf=%u(%s) -> render right after a full-screen flash (book open / chapter / ghost-clear), not animated",
-                            plat->name, w, h, wf, nds_wf_name(wf));
+                            plat->name, w, h, wf, nds_wf_name(wf, plat));
                 }
             } else {
                 nds_first_turn_pending = 0;
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
                 if (nds_verbose_enabled && swept < 40) { swept++;
-                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                            wf, nds_wf_name(wf), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
+                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s settle=%s cfa_skip=%d", plat->name, w, h,
+                            wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
                             nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
-                            (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                            plat->settle_flash ? nds_wf_name(nds_settle_wf(), plat) : "none", (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                 }
                 nds_do_sweep(fd, plat, u);
                 return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
@@ -531,7 +568,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 uint32_t owf = rd32(u, OFF_WAVEFORM);
                 NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u(%s) mode=%s dither=0x%x flags=0x%x", logged, plat->name,
                         rd32(u, OFF_MARKER), rd32(u, OFF_TOP), rd32(u, OFF_LEFT), rd32(u, OFF_WIDTH), rd32(u, OFF_HEIGHT),
-                        owf, nds_wf_name(owf), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", nds_dither(u, plat), rd32(u, plat->flags_off));
+                        owf, nds_wf_name(owf, plat), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", nds_dither(u, plat), rd32(u, plat->flags_off));
             } else if (nds_active && argp && request == nds_active->wait_cmpl) {
                 NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
             } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
@@ -602,6 +639,16 @@ static int nds_init() {
     // Startup block (always logged): mod version, firmware version, then the effective settings.
     NDS_LOG("startup: NickelDissolve " NH_VERSION);
     nds_log_firmware();
+    nds_log_hwconfig();
+    nds_log_waveform();
+    // Debug: nds_debug_dump_flash:1 copies a wide window of raw flash around the waveform region to
+    // the onboard partition, so the .wbf can be pulled over USB and parsed offline (its exact on-flash
+    // offset varies by board). Off by default; only set when investigating waveform capabilities.
+    {
+        const char *dumpv = nds_global_config_get("nds_debug_dump_flash");
+        if (dumpv && atoi(dumpv) == 1)
+            nds_dump_flash(0x600000L, 0x600000L, "/mnt/onboard/nds_flash_dump.bin");
+    }
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
