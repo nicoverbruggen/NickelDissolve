@@ -2,22 +2,18 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
-## Unreleased
-
 ## v0.4
 
 ### Changed
 
-- **Official device support is now the modern Kobo devices only: Clara BW, Clara Colour, and Libra Colour.** The older i.MX devices (Libra 2, Clara 2E) can still install and run it best-effort, but they are not officially supported and may not work well. Support for the AllWinner Elipsa and Sage has been removed entirely: the mod now stays inactive on them.
+- **Official device support is now the modern Kobo devices only: Clara BW, Clara Colour, and Libra Colour.** 
+- The Libra 2 and Clara 2E can still install and run it best-effort, but they are not officially supported and may not work as well as supported devices.
+- Support for the Elipsa and Sage has been removed entirely: the mod now stays inactive on them as the mod did not work reliably.
 
 ### Added
 
-- **The Reading-settings entry now reflects whether your device is supported, in three tiers.** A supported device shows a plain on/off toggle. An i.MX device (Libra 2, Clara 2E) keeps the toggle but adds a note that page turn animations might not work correctly. A device that isn't supported at all shows an "Unsupported" label instead of the toggle.
-- **The startup log now records the device's hardware revision** (from the NTX hardware-config block), which helps diagnose support questions from a log alone.
-
-### Fixed
-
-- **On i.MX devices (Libra 2), page turns render at full quality and menus no longer animate.** Reading turns reuse the panel's own high-quality greyscale waveform, so a page turn looks as it did in v0.3, and only genuine reading turns animate, so the toolbar and menus never sweep. These boards vary by revision, so the settings entry notes that the animation may not work as expected on some of them and can be turned off.
+- The Reading-settings entry now reflects whether your device is supported, in three tiers.*
+- The startup log now records the device's hardware revision.
 
 ## v0.3
 
@@ -47,8 +43,7 @@ All notable, user-visible changes to NickelDissolve. Release notes are generated
 
 ## v0.2
 
-Reliability and polish for the page-turn animation, confirmed on the Kobo Clara BW and Kobo
-Libra Colour.
+Reliability and polish for the page-turn animation, confirmed on the Kobo Clara BW and Kobo Libra Colour.
 
 ### Fixed
 

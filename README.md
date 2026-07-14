@@ -1,11 +1,11 @@
 # NickelDissolve
 
-> [!WARNING]
-> **Initial, experimental release.** Officially supported on the Kobo **Libra Colour**, **Clara Colour**, and **Clara BW**. Other devices (including the older Libra 2 and Clara 2E) are **⚠️ not officially supported**: the mod still installs and can run on them, but it may not work, and its settings entry shows it as unsupported. Behaviour and configuration may still change. It's reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees.
+> [!IMPORTANT]
+> Due to hardware restrictions, this mod is officially only supported on the Kobo **Libra Colour**, **Clara Colour**, and **Clara BW**. Older devices are not officially supported. The mod is reversible and shouldn't brick your device (see [Is it safe?](#is-it-safe)), but there are no guarantees. Always make a backup first.
 
-NickelDissolve gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
+This mod gives your Kobo a **Kindle-style page-turn animation**: instead of the whole page changing at once, the new page sweeps in from the side as a smooth band-wipe.
 
-See it in action: **[short demo video](https://www.youtube.com/shorts/viUPrkyF2Yg)**.
+See it in action on a Kobo Clara BW: **[short demo video](https://www.youtube.com/shorts/viUPrkyF2Yg)**.
 
 ## What it does
 
@@ -26,15 +26,9 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 | Kobo Libra Colour | ✅ Officially supported, tested (including colour-page handling) |
 | Kobo Clara Colour | ✅ Officially supported (same hardware family as the Libra Colour) |
 | Kobo Clara BW | ✅ Officially supported, tested (black-and-white) |
-| Kobo Libra 2 | ⚠️ Not officially supported; may work if you install it |
-| Kobo Clara 2E | ⚠️ Not officially supported; may work if you install it |
-| Kobo Elipsa 2E | ⚠️ Not officially supported (modern MediaTek family, likely works; not verified) |
-| Kobo Elipsa / Sage | ❌ Not supported; the mod stays inactive |
+| Kobo Libra 2 | ⚠️ Not officially supported; may work if you install it (hardware revision dependent) |
+| Kobo Clara 2E | ⚠️ Not officially supported; may work if you install it (hardware revision dependent) |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
-
-**Officially supported: the Kobo Libra Colour, Clara Colour, and Clara BW.** On these the animation is reliable.
-
-**Other devices** can still install and run the mod, but they are not officially supported. On i.MX devices (Libra 2, Clara 2E) the "Page turn animations" entry in the Reading settings keeps the on/off switch but adds a note that it may not work; on devices that aren't supported at all, the switch is replaced with an "Unsupported" note. If you want to try it anyway, the config file still works.
 
 On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.
 
@@ -47,20 +41,8 @@ On colour devices (Kaleido screens), pages with **colour content** are detected 
 ## Removing or turning it off
 
 - **Turn off or on from Settings (easiest):** on your Kobo, open **Settings**, go to **Reading**, and under **Page Appearance** you'll find a **Page turn animations:** switch, right alongside the built-in options like Dark Mode. Uncheck it to turn the animation off, check it to turn it back on. The change takes effect on the very next page turn and is remembered after a reboot, so there's no file to edit. (On the rare device where this switch can't be added, use the config-file method below instead.)
-- **Remove completely:** delete the file `KOBOeReader/.adds/nickel-dissolve/uninstall` and reboot. The mod removes itself.
+- **Remove completely:** delete the file `KOBOeReader/.adds/nickel-dissolve/uninstall` and reboot. The mod removes itself. Page turns will be back to normal.
 - **Turn off but keep installed (config file):** create a text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` containing the line `nds_mode:off`, then reboot.
-
-## Customizing
-
-You don't need a configuration file; the defaults are tuned per device. If you want to tweak, create a plain-text file named `config` in `KOBOeReader/.adds/nickel-dissolve/` with one setting per line. A few popular ones:
-
-```
-nds_delay_us:30000      # slow the animation down
-nds_direction:ltr       # sweep left-to-right instead
-nds_animate_on_tap:0    # taps turn instantly; swipes and buttons still animate
-```
-
-Changes apply on the next reboot; delete the file to go back to the defaults. The `doc` file in the same folder on your device explains every setting, and the full reference lives in [ABOUT.md](ABOUT.md).
 
 ## Reporting a problem
 
@@ -86,9 +68,4 @@ Curious how it works, what every configuration value (including the `nds_debug_*
 
 ## Credits
 
-Built on [NickelHook](https://github.com/pgaskin/NickelHook) by Patrick Gaskin.
-
-This mod was created by the author with the help of the following large language models:
-
-- Claude Opus 4.8
-- Claude Fable
+Built on [NickelHook](https://github.com/pgaskin/NickelHook) by Patrick Gaskin. This mod was created by the author with the help of the some large language models, including Anthropic's Opus and Fable. Tested on the author's own devices and some Kobo's by members of the community. Thank you!
