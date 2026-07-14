@@ -13,18 +13,16 @@ not the perfectly smooth hardware swipe, but with greyscale strips it reads well
 ## Device support
 
 Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour, and Libra Colour.
-On other devices (the older Libra 2 and Clara 2E, and the large Elipsa and Sage) the mod still
-installs and can run, but it is not officially supported and may not work. The "Page turn
-animations" entry in the Reading settings tells you whether your device is supported.
+The older Libra 2 and Clara 2E can still install and run it, but they are not officially supported
+and it may not work there. Everything else (including the Elipsa and Sage) is not supported: the mod
+stays inactive. The "Page turn animations" entry in the Reading settings tells you whether your
+device is supported.
 
 ## Setup
 
 Nothing to set up: the animation is ON after installing and rebooting, for every way of turning
 a page: swipes, taps, and the page-turn buttons. Each gesture can be turned off individually
 (see below).
-
-Elipsa and Sage are the one exception: the wipe is slow on those large panels, so on them the
-mod stays passive unless you explicitly create a config with `nds_mode:sweep`.
 
 ## Configuration (optional)
 

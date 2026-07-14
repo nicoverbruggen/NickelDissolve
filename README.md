@@ -29,7 +29,7 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 | Kobo Libra 2 | ⚠️ Not officially supported; may work if you install it |
 | Kobo Clara 2E | ⚠️ Not officially supported; may work if you install it |
 | Kobo Elipsa 2E | ⚠️ Not officially supported (modern MediaTek family, likely works; not verified) |
-| Kobo Elipsa / Sage | ⚠️ Not officially supported; slow on these large panels |
+| Kobo Elipsa / Sage | ❌ Not supported; the mod stays inactive |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
 **Officially supported: the Kobo Libra Colour, Clara Colour, and Clara BW.** On these the animation is reliable.

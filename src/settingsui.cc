@@ -57,9 +57,6 @@ void (*nds_touchcheckbox_ctor)(void *self, void *parent) = nullptr; // TouchChec
 extern "C" volatile int nds_runtime_animate;           // -1 = follow config, 0 = off, 1 = on
 extern "C" int nds_animations_enabled(void);           // current effective state (config or runtime)
 extern "C" int nds_device_support(void);               // 2 = supported (hwtcon), 1 = may work (mxcfb), 0 = not
-// MainWindowController toast API, resolved by the dlsym table in nickeldissolve.cc (kept as void* there
-// so that file needs no Qt); cast to the real signatures here. Both .optional, so absence = no toast.
-extern "C" { extern void *nds_mwc_shared_fn; extern void *nds_mwc_toast_fn; }
 
 static NdsBridge *g_nds_bridge = nullptr;
 
@@ -189,36 +186,6 @@ void NdsBridge::onAnimationToggled(bool on) {
     nds_runtime_animate = on ? 1 : 0;     // takes effect on the very next page turn, no reboot
     nds_settings_persist_mode(on);        // and survives a reboot
     NDS_LOG("settings: page-turn animations toggled %s", on ? "on" : "off");
-}
-
-// Show the one-time "device not supported" toast. Runs on the main thread (invoked via a queued
-// connection from the ioctl hook). Fail-safe: if the toast API wasn't resolved on this firmware, or the
-// controller isn't up yet, it simply does nothing.
-void NdsBridge::showUnsupportedAlert() {
-    if (!nds_mwc_shared_fn || !nds_mwc_toast_fn)
-        return;
-    typedef void *(*mwc_shared_t)();
-    typedef void (*mwc_toast_t)(void *, const QString &, const QString &, int);
-    void *mw = ((mwc_shared_t)nds_mwc_shared_fn)();
-    if (!mw)
-        return;
-    ((mwc_toast_t)nds_mwc_toast_fn)(mw,
-        QStringLiteral("Page turn animations turned off"),
-        QStringLiteral("Your device's hardware revision is not supported."), 5000);
-}
-
-// Create the bridge QObject on the main thread (nds_init runs there), so the unsupported alert has a
-// main-thread object to marshal to even before the Reading-settings page is ever opened.
-extern "C" void nds_settings_init(void) {
-    if (!g_nds_bridge)
-        g_nds_bridge = new (std::nothrow) NdsBridge(nullptr);
-}
-
-// Trigger the unsupported alert. Thread-safe: posts to the bridge's (main) thread, so it is safe to
-// call from the ioctl hook whatever thread that runs on. No-op if the bridge doesn't exist.
-extern "C" void nds_alert_unsupported(void) {
-    if (g_nds_bridge)
-        QMetaObject::invokeMethod(g_nds_bridge, "showUnsupportedAlert", Qt::QueuedConnection);
 }
 
 // Build a divider that matches the native row separators. Each native separator is a plain QWidget
@@ -357,7 +324,7 @@ void _nds_settings_ctor(void *self, void *parent) {
     // Caption below the row: none on a fully supported device (a clean row, like v0.3); a caution on a
     // "may work" device; a "not available" note on an unsupported one. Styled as a smaller sub-caption.
     const char *caption =
-        support == 1 ? "Your device may not be supported. Depending on its hardware revision, page turn animations might not work correctly."
+        support == 1 ? "Depending on the revision of your device, this mod may not work as expected. If the animation looks broken, you should turn the mod off."
       : support == 0 ? "Your device is not supported, so page turn animations are not available."
                      : nullptr;
     if (caption) {

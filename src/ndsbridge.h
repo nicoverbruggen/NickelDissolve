@@ -12,7 +12,6 @@ public:
     explicit NdsBridge(QObject *parent = nullptr) : QObject(parent) {}
 public slots:
     void onAnimationToggled(bool on);
-    void showUnsupportedAlert();
 };
 
 #endif
