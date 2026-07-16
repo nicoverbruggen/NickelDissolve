@@ -39,7 +39,6 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |
 | `nds_animate_on_tap` | `1` | `0` = tap turns change instantly instead of animating |
 | `nds_animate_on_button` | `1` | `0` = page-turn button presses change instantly instead of animating |
-| `nds_animate_first_turn` | `1` | `0` = let the first page turn after opening a book do Kobo's usual full flash instead of animating it |
 | `nds_log` | `0` | `1` = write verbose page-turn traces to the log (for troubleshooting) |
 
 Example (slow the wipe down and make taps turn instantly, a classic Kindle-like split):

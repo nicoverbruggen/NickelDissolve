@@ -16,9 +16,27 @@ sequence of partial refreshes, so it's a **stepped** wipe, not a perfectly smoot
 
 Three hooks, all resolved by symbol name (so no per-firmware offsets):
 
-- **`ReadingView::nextPageWithTimer` / `prevPageWithTimer`** (in `libnickel`): fire on a page turn. They **arm the sweep** and record the direction (a backward turn sweeps the opposite way).
+- **`ReadingView::goToNextPage` / `goToPrevPage`** (in `libnickel`): the single sink every sequential page turn funnels into — a tap (`tapGesture` → `nextPage`), a swipe, and a physical button (`nextPageWithTimer`) all reach it through the PLT. They **arm the sweep** and record the **true direction** (which of the two fired; a backward turn sweeps the opposite way). Because it's the common sink, direction is Nickel's own decision rather than inferred, and non-turn renders (menus, book-open) never reach it, so they never arm.
 - **`ioctl`** (in `libkobo`): when a turn is armed, the next full-screen e-ink update is the page render; in `sweep` mode it's replaced with N swept partial-strip updates (except Kaleido *colour* pages, which are detected from their CFA flag bits and left to full-refresh normally; see `nds_debug_color_skip`). Each strip **reuses the turn's own waveform** (so whatever the device/page uses, whether GLR16, REAGL, or a Kaleido CFA mode, is preserved). The **last strip reuses Nickel's update marker**, so its following `WAIT_FOR_UPDATE_COMPLETE` resolves and there's no hang; a fallback resubmits the original if that strip fails.
 - **Kobo-agnostic.** The two flat Kobo e-ink interfaces (`hwtcon` on MTK, `mxcfb` on i.MX) share the same update-struct prefix, so the mod recognises either by its `ioctl` number and drives it by field offset. There's no per-struct code. Any other interface (such as the AllWinner `sunxi` used by the Elipsa/Sage) is not handled: the mod stays inactive there. Screen dimensions are read from the update itself (resolution-independent).
+
+## How e-ink refreshes work
+
+Background for the above: a NickelDissolve strip, and every Kobo screen update, is one e-ink *refresh*, and a few properties of those refreshes shape the whole design.
+
+**A pixel changes by moving particles, not by setting a value.** Each e-ink pixel is a microcapsule of charged black/white particles (plus coloured ones on Kaleido). Changing it means driving the panel through a *sequence of voltage pulses over many frames* so the particles physically migrate. That pulse sequence is the **waveform**.
+
+**Refresh time is dominated by the waveform's frame count, not the region size.** The controller runs the waveform for its fixed duration whether the update covers the whole screen or a sliver; a bigger region costs more only in data/DMA, a secondary term. This is why splitting a turn into N strips costs on the order of N refreshes, and why `nds_strips` and `nds_delay_us` are the smoothness/speed dials.
+
+**The waveform mode is the quality/speed dial**, and it's the vocabulary in the config and the logs:
+
+- **GC16** — full 16-level greyscale, the "flash": it cycles pixels through black and white to fully settle, so no ghosting, but it visibly blinks and is slow. Kobo forces it on book-open, chapter jumps, and wake; NickelDissolve never sweeps a GC16 update, it lets that flash happen.
+- **GLR16 / GL16 / REAGL** — flashless greyscale ("regal"): straight to the new image, no black blink, at a slight ghosting risk. This is the normal reading page-turn waveform, and what the swept strips reuse.
+- **DU / A2** — 1–2 level, very fast and ghosty; used for menus and quick feedback.
+
+**One update is one `ioctl` to the EPD controller**, describing a rectangle (top/left/width/height), a waveform mode, full vs partial, and a **marker** (an id). The controller reads the framebuffer for that rectangle and drives the panel through the waveform. Software then waits on the marker — either for *submission* (queued) or *completion* (settled on glass). That is how Nickel serialises a turn, and how the mod's last strip reuses Nickel's marker so the following wait resolves and nothing hangs.
+
+**The panel must be powered to drive anything.** After a short idle the controller powers down the panel's source/gate drivers and the EPD PMIC (VCOM); the next update has to wake them first, and after a full system sleep the whole display pipeline re-inits. That wake latency falls on the first update after an idle, so the first turn after a pause or a wake is heavier than a warm one.
 
 ## Configuration reference
 
@@ -70,13 +88,9 @@ The two e-ink platforms need different pacing, so unset knobs fall back to a per
 
 By default **every page-turn gesture animates** (swipes, taps, and physical page-turn buttons), and each can be disabled individually via `nds_animate_on_swipe` / `nds_animate_on_tap` / `nds_animate_on_button`.
 
-Telling the gestures apart takes two cooperating signals, because the hooks alone can't do it: swipes *and* button presses both arrive via the hookable `ReadingView::nextPageWithTimer` / `prevPageWithTimer` pair, while a tap-to-turn goes through `nextPage` / `prevPage`, which are not PLT-hookable (`ABS32`-only). So the mod also installs an **app-wide Qt event filter** (`gesture.cc`) that classifies the most recent finished input: a key press is a BUTTON, a press→release that moved less than ~40 px is a TAP (recording the tap position), anything longer is a SWIPE. The sweep decision then pairs the signals:
+Direction and whether a turn even happened both come from the `goToNextPage` / `goToPrevPage` sink, so the mod infers neither. What the sink can't say is which input caused the turn, and the per-gesture toggles need that. So the mod also installs an **app-wide Qt event filter** (`gesture.cc`) that classifies the most recent finished input purely by type: a key press is a BUTTON, a press→release that moved less than ~40 px is a TAP, anything longer is a SWIPE. An armed turn then applies the matching toggle: a key → `nds_animate_on_button`, a tap → `nds_animate_on_tap`, otherwise (a swipe, or the filter not up yet) → `nds_animate_on_swipe`.
 
-- **armed render + last input was a key** → button turn, gated by `nds_animate_on_button`;
-- **armed render otherwise** → swipe turn, gated by `nds_animate_on_swipe`;
-- **unarmed full-screen render + a fresh TAP** → tap turn, gated by `nds_animate_on_tap`. The tap's position supplies the direction (left half = backward, right half = forward, matching Kobo's reading tap zones), so tapped turns sweep the right way instead of reusing the last swipe's direction.
-
-The filter observes only; every event passes through unchanged. If it isn't installed yet (no Qt application at plugin load; the page-turn hooks retry from the UI thread), tap detection falls back to the old behaviour: any full-screen page render animates while `nds_animate_on_tap` is enabled, using the last swipe's direction. Residual caveat even with the filter: a tap that triggers a non-turn full-screen render (rare on the reading screen; most such renders are GC16 flashes, which never animate) can still catch an animation.
+The filter observes only; every event passes through unchanged, and it never touches direction — that is always which of the two sinks fired. Because arming is the real turn sink, a center tap that merely raises the reading menu never reaches `goToNextPage`, so it never arms and never animates; there is no tap-zone or tap-position logic at all. (An earlier version predated the sink hook and inferred a tap's direction from which screen half it landed in, which sweeps the wrong way for readers who remap Kobo's tap zones; hooking the sink is what fixed that.)
 
 ## Safety internals
 
@@ -117,7 +131,7 @@ So `nds_wf_sweepable` sweeps **only** `GL16`/`GLR16` (greyscale reading turns). 
 This is a work in progress. Known gaps and things I still want to do, roughly in priority order:
 
 - **✅ Waveform-based colour skip, confirmed on hardware (Libra Colour, fw 4.45.23697).** A colour kepub logged `SWEEP … wf=4(GLR16)` on every B&W text turn and `SKIP … wf=10(GCC16) … not a B&W reading turn` on every colour/image turn, with `flags=0x600` present on *both* (confirming the CFA field is device-level, not content). The `GL16`/`GLR16`-only allowlist separates them cleanly; menu (`AUTO`/`DU`) and exit-to-home (`GC16`) renders were also correctly passed through. Clara Colour shares the exact MT8113T hwtcon-Kaleido `KoboScreenMTK` path, so the same holds; Clara BW is mono (GLR16 turns, no colour). Remaining: physically confirm on the two Clara models.
-- **✅ Per-gesture control, confirmed on hardware.** Startup logged `gesture_filter=1` and swipe turns animated with correct direction. Remaining: confirm tap direction-from-position and BUTTON classification on a device with page-turn buttons (the Libra Colour has none).
+- **✅ Per-gesture control and true direction, confirmed on hardware.** Swipe, tap, and button turns all animate, and the sweep direction comes from the `goToNextPage`/`goToPrevPage` sink rather than the tapped screen half — so it's correct even with remapped/one-handed tap zones. Confirmed on the Clara BW (taps) and the Libra Colour (page-turn buttons).
 - **Non-supported devices.** The i.MX (Libra 2, Clara 2E) code path remains so those devices can still install and run it best-effort, but they are not officially supported and may not work; the settings entry warns and lets you turn it off. The AllWinner sunxi devices (Elipsa, Sage) are no longer handled at all: the mod stays inactive on them and marks them Unsupported. Elipsa 2E shares the modern `hwtcon` interface with the supported devices and is treated as supported, but hasn't been run on hardware.
 
 ## Build

@@ -13,9 +13,10 @@
 // We recognise either by its ioctl number and drive it by field offset, so no per-struct code.
 //
 // TRIGGER. Instead of gating on a specific waveform (MTK-only, and wrong for colour/CFA pages), we
-// mark a turn "pending" from ReadingView::next/prevPageWithTimer and sweep the next full-screen
-// update. We REUSE that update's own waveform, so whatever the device/page uses (GLR16, REAGL, a
-// Kaleido CFA mode…) is preserved — the wipe is just that update, chopped into swept strips.
+// mark a turn "pending" from ReadingView::goToNextPage/goToPrevPage — the single sink every turn
+// (tap, swipe, button) funnels into, so it also gives the true direction — and sweep the next
+// full-screen update. We REUSE that update's own waveform, so whatever the device/page uses (GLR16,
+// REAGL, a Kaleido CFA mode…) is preserved — the wipe is just that update, chopped into swept strips.
 //
 // NO HANG. Nickel does WAIT_FOR_UPDATE_COMPLETE(M) after the turn; the LAST strip reuses its marker
 // M, so that wait resolves. If the last strip fails to submit, we resubmit the original update.
@@ -34,6 +35,7 @@
 #include <strings.h>
 #include <unistd.h>
 #include <time.h>
+#include <sys/time.h>
 #include <sys/stat.h>
 
 #include <NickelHook.h>
@@ -53,6 +55,8 @@ enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
 #define WF_GC16 2u                    // GC16 (full black-flash mode) — id 2 on BOTH hwtcon and mxcfb
 #define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
 #define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
+#define NDS_PREWARM_PX     2          // width of the cold-wake lead-in sliver (a hairline; the driver
+                                      // validates region bounds only, no min width — see hwtcon dump)
 
 // ---- platform table: which ioctls carry an e-ink update, per driver ----
 struct nds_platform {
@@ -74,9 +78,9 @@ struct nds_platform {
                                // submission-wait, so it needs an explicit delay or the wipe is instant
     uint32_t      dith_off;    // byte offset of dither_mode in the update struct (0 = don't log it):
                                // hwtcon_update_data has int dither_mode right after flags (@0x20)
-    uint32_t      read_wf;     // the flashless greyscale reading waveform for this platform, used
-                               // when converting a forced-GC16 first-turn refresh into an animated
-                               // sweep (hwtcon: GLR16=4; mxcfb: REAGL=6)
+    uint32_t      read_wf;     // platform's flashless greyscale reading waveform (hwtcon: GLR16=4;
+                               // mxcfb: REAGL=6). Currently unused: it was the target of the
+                               // first-turn GC16->sweep conversion, which has been removed.
     uint32_t      def_strip_wf;// waveform to draw the swept bands with when nds_debug_strip_waveform is
                                // unset. 0 = reuse the update's own waveform. Where reusing the native
                                // reading waveform for every band is too slow (i.MX), use a fast wipe
@@ -131,11 +135,22 @@ static volatile long nds_turn_ts = 0;         // time() when the turn fired (sta
 static volatile long nds_flash_seq = -1;      // nds_gesture_seq() at the last full-screen flash (-1 = none pending)
 static volatile long nds_flash_ts  = 0;       // time() of that flash (staleness bound)
 #define NDS_SETTLE_WINDOW_S 2
-static volatile int  nds_first_turn_pending = 0;  // set when a book-open settle fires; the next turn is the first turn, whose forced GC16 we animate instead of flashing
 static uint32_t nds_ephemeral_marker = 0xF0000000u;   // markers for non-final strips (never collide with Nickel)
 static const struct nds_platform *nds_active = nullptr;   // detected from the first update ioctl (for logging)
 
 static long nds_now() { return (long)time(nullptr); }
+
+// Timing instrumentation (verbose only): locate the "cold controller" first-band stutter by
+// correlating how long we sat idle with how long each band actually takes. Wall-clock µs; only
+// differences are used, so a clock step (unlikely on a reading device) at worst corrupts one line.
+static uint64_t nds_now_us() {
+    struct timeval tv; gettimeofday(&tv, nullptr);
+    return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
+}
+static uint64_t nds_last_send_us = 0;        // last e-ink SEND the hook saw (turn, footer, clock, ...)
+static uint64_t nds_last_turn_us = 0;        // end of the last sweep (an actual page turn)
+static uint64_t nds_turn_idle_any_us  = 0;   // gap before this update since the previous update of any kind
+static uint64_t nds_turn_idle_page_us = 0;   // gap since the last page turn (how long we sat on the page)
 
 // ---- config -----------------------------------------------------------------------------
 // The config file is OPTIONAL: no file (or a missing key) means the defaults below. User keys
@@ -176,6 +191,18 @@ static bool nds_verbose_compute() {
     return nds_global_config_bool("nds_log", false) || nds_config_problem_seen();
 }
 static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : 8; if (n < 2) n = 2; if (n > 32) n = 32; return n; }
+// Cold-controller mitigation (default off): when the EPD has been idle long enough to power down,
+// the next swept turn stutters on band 0 while the panel re-powers. If the idle since the last
+// e-ink update exceeds this many ms, pass Nickel's own full refresh through for that one turn
+// (clean, no stutter) instead of animating it. 0 = disabled (always sweep). Set from the measured
+// power-down knee once known (see the BANDTIME log).
+static int  nds_cold_skip_ms() { const char *v = nds_global_config_get("nds_cold_skip_ms"); int n = (v && *v) ? atoi(v) : 0; if (n < 0) n = 0; return n; }
+// Cold-controller pre-warm (default off): the better cold handler. When the panel has been idle this
+// many ms it has powered down, so the first update pays a ~40ms wake. Instead of skipping the
+// animation (nds_cold_skip_ms), prepend a thin leading-edge sliver to the sweep: the sliver eats the
+// wake on a hairline, then the real bands run warm and the wipe is smooth (just a touch late). When
+// set, this supersedes nds_cold_skip_ms. 0 = disabled.
+static int  nds_prewarm_ms()   { const char *v = nds_global_config_get("nds_prewarm_ms"); int n = (v && *v) ? atoi(v) : 0; if (n < 0) n = 0; return n; }
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debug_wait"); return w && !strcasecmp(w, "complete"); }
 // Inter-strip delay. If nds_delay_us is set in config it always wins; if it's absent, fall back to
@@ -198,11 +225,6 @@ static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_ski
 // home, covers, reading), so the panel's colour pass is skipped everywhere. A debugging /
 // full-B&W-mode switch, independent of the animation. No-op on mono/i.MX. See nds_force_bw use.
 static bool nds_force_bw()    { return nds_global_config_bool("nds_debug_force_bw", false); }
-// Animate the first page turn after opening a book. Kobo renders that turn as a forced GC16 full
-// flash (it can't be talked out of it via settings); when this is on we rewrite it to the
-// platform's flashless reading waveform and sweep it, so the first turn animates like the rest.
-// The book already did a full clear on open, so skipping this one costs little. On by default.
-static bool nds_animate_first_turn() { return nds_global_config_bool("nds_animate_first_turn", true); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
 // (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
@@ -274,7 +296,37 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     if (plat->size > sizeof(v) || sw == 0) { real_ioctl(fd, plat->send, (void *)orig); return; }
 
     const uint32_t cfa_skip = (plat->cfa_skip && nds_cfa_skip()) ? plat->cfa_skip : 0u;
+
+    // Cold-wake lead-in: if the panel has powered down (idle_any past nds_prewarm_ms), the first
+    // update after it stalls ~40ms on the power-on. Spend that stall on a thin sliver at the sweep's
+    // leading edge (left for L->R, right for R->L) so the freeze is a hairline instead of a full band;
+    // the real bands below then run warm and the wipe is smooth. The submission-wait both absorbs the
+    // power-on and keeps the driver from merging the sliver into band 0. Self-gates on idle_any, so
+    // warm turns pay nothing. rc is logged so the device confirms the driver accepts a sliver width.
+    {
+        int pw = nds_prewarm_ms();
+        if (pw > 0 && nds_turn_idle_any_us >= (uint64_t)pw * 1000ull) {
+            memcpy(v, orig, plat->size);
+            uint32_t lx = rtl ? (x0 + W - NDS_PREWARM_PX) : x0;
+            wr32(v, OFF_TOP, y0); wr32(v, OFF_LEFT, lx); wr32(v, OFF_WIDTH, NDS_PREWARM_PX); wr32(v, OFF_HEIGHT, H);
+            wr32(v, OFF_UPDMODE, UPD_PARTIAL);
+            if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
+            if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);
+            uint32_t mk = nds_ephemeral_marker + 0x200u;   // ephemeral, clear of the strip markers below
+            wr32(v, OFF_MARKER, mk);
+            uint64_t st0 = nds_now_us();                        // time the sliver's own submit+wait, so we
+            int rc = real_ioctl(fd, plat->send, v);             // learn its cost warm (cheap) vs cold (~wake).
+            if (rc >= 0 && plat->wait_sub) { uint32_t wm = mk; real_ioctl(fd, plat->wait_sub, &wm); }
+            unsigned long sliver_us = (unsigned long)(nds_now_us() - st0);
+            if (nds_verbose_enabled)   // uncapped: a whole reading session is what we want to sample
+                NDS_LOG("PREWARM [%s] idle_any=%lums -> %dpx %s-edge (rc=%d) sliver=%luus, then warm sweep",
+                        plat->name, (unsigned long)(nds_turn_idle_any_us / 1000ull), NDS_PREWARM_PX,
+                        rtl ? "right" : "left", rc, sliver_us);
+        }
+    }
+
     bool m_ok = false;
+    uint64_t bt[32] = {0};   // per-band send+wait cost, µs (N is clamped to <=32); [0] holds the cold-band cost
     for (int k = 0; k < N; k++) {
         int col = rtl ? (N - 1 - k) : k;
         uint32_t left  = x0 + (uint32_t)col * sw;
@@ -291,7 +343,8 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
         uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
         wr32(v, OFF_MARKER, mk);
 
-        if (real_ioctl(fd, plat->send, v) < 0) continue;
+        uint64_t t0 = nds_now_us();                  // cost of this band = submit + wait (the cold-controller
+        if (real_ioctl(fd, plat->send, v) < 0) continue;   // re-power stall, if any, lands inside band 0 here)
         if (mk == M) m_ok = true;
 
         if (want_complete) {                         // wait for full render between strips
@@ -301,11 +354,30 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
             uint32_t wm = mk;
             real_ioctl(fd, plat->wait_sub, &wm);
         }                                            // mxcfb: no wait needed (no MDP merge)
+        bt[k] = nds_now_us() - t0;                   // excludes the inter-band delay below
         if (delay > 0 && !last) usleep((useconds_t)delay);
     }
     // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
     if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
     nds_ephemeral_marker += (uint32_t)N;
+
+    // The measurement: how long we sat idle vs how much band 0 cost relative to the warm bands. If
+    // band 0 balloons past the rest as idle_page grows, that's the cold re-power landing on band 0.
+    uint64_t end_us = nds_now_us();
+    if (nds_verbose_enabled) {
+        uint64_t rest_sum = 0, rest_max = 0; int rest_n = 0;
+        for (int k = 1; k < N; k++) { rest_sum += bt[k]; if (bt[k] > rest_max) rest_max = bt[k]; rest_n++; }
+        unsigned long rest_avg = rest_n ? (unsigned long)(rest_sum / (uint64_t)rest_n) : 0ul;
+        NDS_LOG("BANDTIME [%s] idle_page=%lums idle_any=%lums | band0=%luus rest_avg=%luus rest_max=%luus | N=%d wait=%s",
+                plat->name,
+                (unsigned long)(nds_turn_idle_page_us / 1000ull),
+                (unsigned long)(nds_turn_idle_any_us / 1000ull),
+                (unsigned long)bt[0], rest_avg, (unsigned long)rest_max, N,
+                want_complete ? "complete" : (plat->wait_sub ? "submission" : "none"));
+    }
+    // The strips were the last real panel activity; anchor the next turn's idle gaps to now.
+    nds_last_turn_us = end_us;
+    nds_last_send_us = end_us;
 }
 
 // ---- per-gesture gating -------------------------------------------------------------------
@@ -329,6 +401,16 @@ extern "C" __attribute__((visibility("default")))
 int _nds_ioctl(int fd, unsigned long request, void *argp) {
     const struct nds_platform *plat = nds_match(request);
     if (plat && argp) nds_active = plat;
+
+    // Idle tracking (for the band-timing log below): record the gap before every e-ink SEND, both
+    // since the previous update of any kind (footer/clock keep the controller warm) and since the
+    // last actual page turn (how long we sat on the page). Our own strips bypass this hook.
+    if (plat && argp && request == plat->send) {
+        uint64_t now_us = nds_now_us();
+        nds_turn_idle_any_us  = nds_last_send_us ? (now_us - nds_last_send_us) : 0;
+        nds_turn_idle_page_us = nds_last_turn_us ? (now_us - nds_last_turn_us) : 0;
+        nds_last_send_us = now_us;
+    }
 
     // Force-B&W: OR CFA_SKIP into every hwtcon update so the whole device renders greyscale.
     // Applies in every mode except "off" (it's not tied to the animation), in place, once.
@@ -370,45 +452,41 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             // menu / open / jump / settle and passes through untouched.
             bool want_anim = armed && nds_gesture_animate();
 
-            // First turn after a book open: Kobo forces GC16 on it. If this armed turn is that GC16,
-            // sweep it (flashless Regal) instead of flashing.
-            if (want_anim && nds_first_turn_pending && is_flash && wf == WF_GC16 && nds_animate_first_turn()) {
-                nds_first_turn_pending = 0;
-                uint8_t conv[128];
-                if (plat->size <= sizeof(conv)) {
-                    memcpy(conv, u, plat->size);
-                    wr32(conv, OFF_WAVEFORM, plat->read_wf);   // GC16 flash -> flashless Regal
-                    bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
-                    if (nds_verbose_enabled)
-                        NDS_LOG("FIRST-TURN [%s] %ux%u: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
-                                plat->name, w, h, plat->read_wf, nds_wf_name(plat->read_wf, plat), rtl ? "R->L" : "L->R");
-                    nds_do_sweep(fd, plat, conv);
-                    return 0;
-                }
-                // update larger than our buffer: leave it as the original GC16 flash (passthrough)
-            }
-
+            // Kobo forces a full GC16 flash on the first turn after a book open / chapter jump / wake.
+            // We let that flash happen (it's below via the is_flash passthrough) rather than converting
+            // it to a sweep: on a freshly-woken, deeply-cold panel that converted sweep stalls band 0
+            // badly, and the flash is what Kobo intends there anyway.
             if (settle) {
-                nds_first_turn_pending = 1;   // the next turn is the first turn after the open
                 static int nset = 0;
                 if (nds_verbose_enabled && nset < 40) { nset++;
                     NDS_LOG("SETTLE [%s] %ux%u wf=%u(%s) -> render right after a full-screen flash (book open / chapter / ghost-clear), not animated",
                             plat->name, w, h, wf, nds_wf_name(wf, plat));
                 }
             } else if (want_anim && !is_flash && nds_wf_sweepable(plat, wf)) {
-                nds_first_turn_pending = 0;
-                bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
-                static int swept = 0;
-                if (nds_verbose_enabled && swept < 40) { swept++;
-                    NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                            wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
-                            nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
-                            (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                int cold_ms = nds_cold_skip_ms();
+                if (nds_prewarm_ms() == 0 && cold_ms > 0 && nds_turn_idle_any_us >= (uint64_t)cold_ms * 1000ull) {
+                    // Cold controller (idle past the EPD power-down): a swept turn would stutter on
+                    // band 0 while the panel re-powers. Let Nickel's own full refresh through for this
+                    // one turn (clean, no stutter) and skip the animation. Falls through to the
+                    // real_ioctl passthrough at the end of the function.
+                    static int cs = 0;
+                    if (nds_verbose_enabled && cs < 40) { cs++;
+                        NDS_LOG("COLD-SKIP [%s] %ux%u idle_any=%lums >= %dms -> plain refresh, not animated",
+                                plat->name, w, h, (unsigned long)(nds_turn_idle_any_us / 1000ull), cold_ms);
+                    }
+                } else {
+                    bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
+                    static int swept = 0;
+                    if (nds_verbose_enabled && swept < 40) { swept++;
+                        NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
+                                wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
+                                nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
+                                (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
+                    }
+                    nds_do_sweep(fd, plat, u);
+                    return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
                 }
-                nds_do_sweep(fd, plat, u);
-                return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
             } else {
-                nds_first_turn_pending = 0;
                 // Passed through: a real turn whose gesture is disabled or isn't a B&W reading turn,
                 // or an unarmed menu/open render. Log the armed cases so a "turn didn't animate"
                 // report is diagnosable (armed=1 but want_anim=0 means the gesture toggle is off or

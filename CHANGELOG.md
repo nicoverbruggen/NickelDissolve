@@ -2,6 +2,17 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
+## v0.5
+
+### Fixed
+
+- **Tap page turns now sweep the correct way, whatever your tap-zone layout.** The sweep direction comes from the actual page turn instead of the side of the screen you tapped, so one-handed or remapped tap zones (say, a big left zone set to go forward) no longer wipe backward.
+- **The first page turn after waking the device no longer stutters.** That turn (and the first turn after opening a book or jumping to a chapter) now does Kobo's normal full refresh, the same as it always did elsewhere, instead of a mistimed sweep that could visibly stall on a just-woken screen.
+
+### Removed
+
+- The `nds_animate_first_turn` setting. The "animate the first turn after opening a book" behaviour it added in v0.3 is what stuttered after a wake, so that turn is back to Kobo's flash.
+
 ## v0.4
 
 ### Changed

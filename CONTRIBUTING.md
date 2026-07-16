@@ -43,7 +43,7 @@ The log is size-capped (256 KB) and rotates once to `nickel-dissolve.log.old`.
 
 ## Firmware compatibility
 
-The two hooked `libnickel` symbols (`ReadingView::next/prevPageWithTimer`) carry `//libnickel <first> <last|*> <symbol>` annotations. The `test/syms` checker (CI job `syms`, also runnable locally with Go: `cd test/syms && go build -o ../../test.syms . && cd ../src && ../test.syms`) verifies them against ~70 real firmware dumps (4.6 → 4.45). The e-ink `ioctl` hook lives in `libkobo.so` and is matched at runtime by ioctl number, so it isn't covered by that checker. An unrecognised platform simply passes through untouched.
+The two hooked `libnickel` symbols (`ReadingView::goToNextPage` / `goToPrevPage`) carry `//libnickel <first> <last|*> <symbol>` annotations. The `test/syms` checker (CI job `syms`, also runnable locally with Go: `cd test/syms && go build -o ../../test.syms . && cd ../src && ../test.syms`) verifies them against ~70 real firmware dumps (4.6 → 4.45). The e-ink `ioctl` hook lives in `libkobo.so` and is matched at runtime by ioctl number, so it isn't covered by that checker. An unrecognised platform simply passes through untouched.
 
 All hooks are `.optional = true` and null-checked at the use site: a missing symbol makes a feature inert, never fatal. Keep it that way. Targets Kobo **4.x** firmware only; 5.x (Qt 6 / Chromium) is out of scope and the mod stays inert there.
 

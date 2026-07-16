@@ -13,7 +13,7 @@ If you've seen a recent Kindle turn a page, you know the effect: the new page gl
 
 Out of the box:
 
-- **Every way of turning a page animates:** swipes, taps, and the physical page-turn buttons. Backward turns sweep the other way, and a tap even sweeps toward the side you tapped.
+- **Every way of turning a page animates:** swipes, taps, and the physical page-turn buttons. Forward and backward turns sweep opposite ways, matching the direction the page is actually turning (whichever tap zones or buttons you use).
 - Each gesture can be turned off individually if you prefer, say, instant taps with animated swipes.
 - Everything else (menus, the home screen, images) is completely untouched.
 
