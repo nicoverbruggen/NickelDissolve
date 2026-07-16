@@ -112,8 +112,8 @@ static inline uint32_t rd32(const uint8_t *b, unsigned off) { uint32_t v; memcpy
 static inline void     wr32(uint8_t *b, unsigned off, uint32_t v) { memcpy(b + off, &v, 4); }
 
 static int  (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
-static void (*real_nextPageWithTimer)(void *self) = nullptr;
-static void (*real_prevPageWithTimer)(void *self) = nullptr;
+static void (*real_goToNextPage)(void *self) = nullptr;
+static void (*real_goToPrevPage)(void *self) = nullptr;
 
 static bool nds_safety_disabled = false;
 // Verbose tracing switch (declared in util.h, used by NDS_DBG + the hot-path traces). Published
@@ -183,9 +183,10 @@ static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debu
 // submission-wait, else the wipe is instant). Returns µs, clamped to [0, 50000].
 static int  nds_delay_us(int def) { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : def; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
 // Per-gesture control: which page-turn gestures animate. DEFAULT: all of them — always use the
-// transition when possible. Swipes and physical page-turn buttons arm via the ReadingView hooks
-// (told apart by the last input the gesture filter saw); taps are recognised by the app-wide Qt
-// event filter (gesture.cc), since Nickel's tap path isn't hookable.
+// transition when possible. Every real next/prev turn arms via the goToNextPage/goToPrevPage
+// hooks (taps, swipes, and physical buttons all funnel through them), which also record the true
+// direction; the app-wide Qt event filter (gesture.cc) only supplies the input TYPE, so each
+// turn's animation can be enabled or disabled per gesture.
 static bool nds_animate_swipe()  { return nds_global_config_bool("nds_animate_on_swipe", true); }
 static bool nds_animate_tap()    { return nds_global_config_bool("nds_animate_on_tap", true); }
 static bool nds_animate_button() { return nds_global_config_bool("nds_animate_on_button", true); }
@@ -308,37 +309,19 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
 }
 
 // ---- per-gesture gating -------------------------------------------------------------------
-// Decide whether this page render should animate, from the per-gesture flags and the last input
-// gesture the Qt event filter saw (gesture.cc). `armed` = the render was announced by a
-// ReadingView turn hook, which is the path swipes AND physical page-turn buttons take — the
-// filter's last input tells them apart. An unarmed render can only be a tap turn (Nickel's tap
-// path isn't hookable), so it must be backed by a fresh TAP; the tap's position also gives the
-// direction (left half = backward, right half = forward — Kobo's reading tap zones), overriding
-// the last swipe's direction. Without the filter (no Qt app yet), fall back to the old
-// behaviour: armed renders count as swipes, unarmed ones animate whenever tap turns are enabled.
-static bool nds_gesture_animate(bool armed, uint32_t width) {
+// Whether the turn that just fired should animate, given its input type. The goToNextPage/
+// goToPrevPage hooks already armed the turn and recorded the true direction; this only maps the
+// last input the Qt filter saw (gesture.cc) to that gesture's on/off toggle. A center tap that
+// merely raises the reading menu never reaches goToNextPage, so it never arms and never gets
+// here — no tap-position or zone guessing is involved. If the filter isn't up yet, or the input
+// is stale/unknown, treat it as a swipe (the common case) so the turn still animates by default.
+static bool nds_gesture_animate() {
     long gts = 0; int tap_x = -1;
     enum nds_gesture g = nds_gesture_last(&gts, &tap_x);
     bool fresh = g != NDS_GESTURE_NONE && (nds_now() - gts) <= NDS_TURN_WINDOW_S;
-
-    if (armed) {
-        if (fresh && g == NDS_GESTURE_BUTTON) return nds_animate_button();
-        if (fresh && g == NDS_GESTURE_TAP) return nds_animate_tap();
-        return nds_animate_swipe();
-    }
-    if (!nds_animate_tap()) return false;
-    if (!nds_gesture_filter_installed()) return true;   // legacy: any full-screen page render
-    if (!fresh || g != NDS_GESTURE_TAP) return false;   // not caused by a recent tap
-    // A center tap raises the reading menu; it does not turn the page. Kobo's turn zones are the left
-    // and right of the screen, the middle is the menu. Animating the menu's full-screen redraw is the
-    // "toolbar/menu sweeps in" bug on i.MX (where any full-screen non-flash update can be swept). So
-    // only animate taps that land in the outer turn zones, and take the direction from the side.
-    if (tap_x >= 0 && width > 0) {
-        const uint32_t x = (uint32_t)tap_x;
-        if (x > width / 3u && x < (width * 2u) / 3u) return false;   // center third = menu, not a turn
-        nds_turn_dir = (x >= width / 2u) ? 0 : 1;
-    }
-    return true;
+    if (fresh && g == NDS_GESTURE_BUTTON) return nds_animate_button();
+    if (fresh && g == NDS_GESTURE_TAP)    return nds_animate_tap();
+    return nds_animate_swipe();
 }
 
 // ---- ioctl hook -------------------------------------------------------------------------
@@ -361,20 +344,20 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 
         const uint8_t *u = (const uint8_t *)argp;
         uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
-        // Armed by a swipe/button (turn hook) — or, when tap turns animate, by any full-screen
-        // page render (Nickel's tap path isn't hookable; nds_gesture_animate narrows it down).
-        if ((nds_turn_pending || nds_animate_tap()) && w >= 512 && h >= 512) {
-            bool armed = nds_turn_pending != 0;
+        // Process a full-screen render when a real next/prev turn just armed it (goToNextPage/
+        // goToPrevPage hook), or when a book is open (so book-open / chapter-jump flashes can be
+        // tracked for the settle below). Menus, home and library are neither, so they never enter.
+        if ((nds_turn_pending || nds_reader_is_open()) && w >= 512 && h >= 512) {
+            bool armed = nds_turn_pending != 0;             // a genuine next/prev turn; nds_turn_dir is set
             nds_turn_pending = 0;                           // consume the trigger (one per turn)
             // A flash is a GC16 update (hwtcon) or, on i.MX where the reading turn is PARTIAL, any
             // update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
             uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
             bool is_flash = (wf == WF_GC16) || (plat->flash_full && md == UPD_FULL);
-            // Book-open / chapter-jump settle (see nds_flash_seq): a full-screen flash records the
-            // gesture that caused it; the next full-screen content render from that SAME gesture is
-            // the open/jump settle and must not animate. A later turn (new gesture) animates, so
-            // turn-1's own GC16 flash does not suppress turn-2. Only unarmed flashes arm this — an
-            // armed (swipe/button) ghost-clear is a real turn, not an open.
+            // Book-open / chapter-jump settle (see nds_flash_seq): an unarmed full-screen flash
+            // records the gesture that caused it; the next full-screen content render from that SAME
+            // gesture is the open/jump settle and must not animate. A real turn is armed, so a turn's
+            // own GC16 flash never records a settle and never suppresses the next turn.
             long gseq = nds_gesture_seq();
             bool settle = false;
             if (is_flash) {
@@ -383,36 +366,13 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 settle = (nds_flash_seq >= 0 && gseq == nds_flash_seq && (nds_now() - nds_flash_ts) <= NDS_SETTLE_WINDOW_S);
                 nds_flash_seq = -1;   // consume: only the first full render after a flash can settle
             }
-            // First turn after a book open: Kobo forces GC16 on it. nds_first_turn_pending was armed
-            // by the open settle; if this is that turn's GC16, animate it as a Regal sweep instead.
-            // Converting bypasses the waveform gate (which normally keeps home/menus from sweeping),
-            // so we only do it when we KNOW we're in a book: either the render is armed (a
-            // *PageWithTimer forward/back turn) or the ReadingView is on screen. Home / menu / opening
-            // another book are neither armed nor in-reader, so they can't be mistaken for the first
-            // turn even while the flag is still pending. Using the reader flag (not just armed) also
-            // lets an unarmed tap first-turn convert.
-            bool convert_first_turn = nds_first_turn_pending && (armed || nds_reader_is_open())
-                                      && is_flash && wf == WF_GC16 && nds_animate_first_turn();
-            // Sweep only a genuine B&W reading turn whose gesture is enabled. The waveform gate is
-            // the colour guard AND the reader-context guard in one: colour pages get a colour
-            // waveform, flashes/menus/home get GC16/A2/AUTO — none are GL16/GLR16, so none sweep.
-            if (!nds_gesture_animate(armed, w)) {
-                nds_first_turn_pending = 0;
-                // Gesture disabled, or the render wasn't caused by a fresh tap: pass through.
-                // Log why (verbose), so a "tap didn't animate" report is diagnosable from a log:
-                // armed=0 gesture=NONE means the filter never classified the tap (the turn likely
-                // fired before the touch release); gesture=SWIPE means it was mis-thresholded.
-                if (nds_verbose_enabled) {
-                    static int n = 0;
-                    if (n < 40) { n++;
-                        long gts = 0; int tx = -1;
-                        enum nds_gesture g = nds_gesture_last(&gts, &tx);
-                        NDS_LOG("no-anim [%s] %ux%u armed=%d gesture=%s age=%lds tap_x=%d filter=%d animate_tap=%d -> passthrough",
-                                plat->name, w, h, armed, nds_gesture_name(g), nds_now() - gts, tx,
-                                nds_gesture_filter_installed(), nds_animate_tap());
-                    }
-                }
-            } else if (convert_first_turn) {
+            // Only a genuine turn (armed) whose gesture is enabled animates. Everything unarmed is a
+            // menu / open / jump / settle and passes through untouched.
+            bool want_anim = armed && nds_gesture_animate();
+
+            // First turn after a book open: Kobo forces GC16 on it. If this armed turn is that GC16,
+            // sweep it (flashless Regal) instead of flashing.
+            if (want_anim && nds_first_turn_pending && is_flash && wf == WF_GC16 && nds_animate_first_turn()) {
                 nds_first_turn_pending = 0;
                 uint8_t conv[128];
                 if (plat->size <= sizeof(conv)) {
@@ -420,28 +380,22 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     wr32(conv, OFF_WAVEFORM, plat->read_wf);   // GC16 flash -> flashless Regal
                     bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                     if (nds_verbose_enabled)
-                        NDS_LOG("FIRST-TURN [%s] %ux%u armed=%d reader_open=%d: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
-                                plat->name, w, h, armed, nds_reader_is_open(), plat->read_wf, nds_wf_name(plat->read_wf, plat), rtl ? "R->L" : "L->R");
+                        NDS_LOG("FIRST-TURN [%s] %ux%u: forced GC16 -> wf=%u(%s) sweep %s (animate first turn)",
+                                plat->name, w, h, plat->read_wf, nds_wf_name(plat->read_wf, plat), rtl ? "R->L" : "L->R");
                     nds_do_sweep(fd, plat, conv);
                     return 0;
                 }
                 // update larger than our buffer: leave it as the original GC16 flash (passthrough)
-            } else if (is_flash || !nds_wf_sweepable(plat, wf)) {
-                nds_first_turn_pending = 0;
-                static int cskip = 0;
-                if (nds_verbose_enabled && cskip < 40 && !is_flash) { cskip++;
-                    NDS_LOG("SKIP [%s] %ux%u wf=%u(%s) mode=%s dither=0x%x flags=0x%x -> not a B&W reading turn",
-                            plat->name, w, h, wf, nds_wf_name(wf, plat), md == UPD_FULL ? "FULL" : "PARTIAL",
-                            nds_dither(u, plat), rd32(u, plat->flags_off));
-                }
-            } else if (settle) {
-                nds_first_turn_pending = 1;   // the next full-screen turn is the first turn after the open
+            }
+
+            if (settle) {
+                nds_first_turn_pending = 1;   // the next turn is the first turn after the open
                 static int nset = 0;
                 if (nds_verbose_enabled && nset < 40) { nset++;
                     NDS_LOG("SETTLE [%s] %ux%u wf=%u(%s) -> render right after a full-screen flash (book open / chapter / ghost-clear), not animated",
                             plat->name, w, h, wf, nds_wf_name(wf, plat));
                 }
-            } else {
+            } else if (want_anim && !is_flash && nds_wf_sweepable(plat, wf)) {
                 nds_first_turn_pending = 0;
                 bool rtl = nds_rtl(); if (nds_turn_dir == 1) rtl = !rtl;
                 static int swept = 0;
@@ -453,6 +407,22 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 }
                 nds_do_sweep(fd, plat, u);
                 return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
+            } else {
+                nds_first_turn_pending = 0;
+                // Passed through: a real turn whose gesture is disabled or isn't a B&W reading turn,
+                // or an unarmed menu/open render. Log the armed cases so a "turn didn't animate"
+                // report is diagnosable (armed=1 but want_anim=0 means the gesture toggle is off or
+                // the filter mis-classified; a flash/colour turn shows wf).
+                if (nds_verbose_enabled && armed) {
+                    static int n = 0;
+                    if (n < 40) { n++;
+                        long gts = 0; int tx = -1;
+                        enum nds_gesture g = nds_gesture_last(&gts, &tx);
+                        NDS_LOG("no-anim [%s] %ux%u dir=%s gesture=%s age=%lds wf=%u(%s) want_anim=%d -> passthrough",
+                                plat->name, w, h, nds_turn_dir ? "back" : "fwd", nds_gesture_name(g),
+                                nds_now() - gts, wf, nds_wf_name(wf, plat), want_anim);
+                    }
+                }
             }
         }
     }
@@ -481,21 +451,25 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 }
 
 // ---- page-turn hooks: arm the sweep + record direction ----------------------------------
-// These run on the UI thread, so they double as a safe retry point for installing the gesture
-// filter in case the Qt application didn't exist yet at plugin init.
+// ReadingView::goToNextPage / goToPrevPage are the single sink every sequential page turn funnels
+// into: a tap goes tapGesture -> nextPage -> goToNextPage, a swipe or physical button goes
+// nextPageWithTimer -> goToNextPage, all via the PLT, so hooking this pair catches every turn type
+// and records its true direction — no tap-position or tap-zone guessing. Chapter jumps and book
+// opens use other paths, so they never arm here. These run on the UI thread, so they double as a
+// safe retry point for installing the gesture filter in case Qt didn't exist yet at plugin init.
 extern "C" __attribute__((visibility("default")))
-void _nds_nextPageWithTimer(void *self) {
+void _nds_goToNextPage(void *self) {
     nds_gesture_filter_install();
     nds_turn_dir = 0; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: forward"); }
-    if (real_nextPageWithTimer) real_nextPageWithTimer(self);
+    if (real_goToNextPage) real_goToNextPage(self);
 }
 extern "C" __attribute__((visibility("default")))
-void _nds_prevPageWithTimer(void *self) {
+void _nds_goToPrevPage(void *self) {
     nds_gesture_filter_install();
     nds_turn_dir = 1; nds_turn_pending = 1; nds_turn_ts = nds_now();
     static int n = 0; if (nds_verbose_enabled && n < 16) { n++; NDS_LOG("turn: backward"); }
-    if (real_prevPageWithTimer) real_prevPageWithTimer(self);
+    if (real_goToPrevPage) real_goToPrevPage(self);
 }
 
 // ---- init / uninstall -------------------------------------------------------------------
@@ -555,14 +529,14 @@ static struct nh_hook NickelDissolveHooks[] = {
     { .sym = "ioctl", .sym_new = "_nds_ioctl",
       .lib = NDS_LIBKOBO, .out = nh_symoutptr(real_ioctl),
       .desc = "intercept the e-ink page-turn update and sweep it", .optional = true },
-    //libnickel 4.6.9960 * _ZN11ReadingView17nextPageWithTimerEv
-    { .sym = "_ZN11ReadingView17nextPageWithTimerEv", .sym_new = "_nds_nextPageWithTimer",
-      .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_nextPageWithTimer),
-      .desc = "arm sweep, forward", .optional = true },
-    //libnickel 4.6.9960 * _ZN11ReadingView17prevPageWithTimerEv
-    { .sym = "_ZN11ReadingView17prevPageWithTimerEv", .sym_new = "_nds_prevPageWithTimer",
-      .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_prevPageWithTimer),
-      .desc = "arm sweep, backward", .optional = true },
+    //libnickel 4.6.9960 * _ZN11ReadingView12goToNextPageEv
+    { .sym = "_ZN11ReadingView12goToNextPageEv", .sym_new = "_nds_goToNextPage",
+      .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_goToNextPage),
+      .desc = "arm sweep + record forward direction (all turn types)", .optional = true },
+    //libnickel 4.6.9960 * _ZN11ReadingView12goToPrevPageEv
+    { .sym = "_ZN11ReadingView12goToPrevPageEv", .sym_new = "_nds_goToPrevPage",
+      .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_goToPrevPage),
+      .desc = "arm sweep + record backward direction (all turn types)", .optional = true },
     //libnickel 4.6.9960 * _ZN21N3SettingsReadingViewC1EP7QWidget
     { .sym = "_ZN21N3SettingsReadingViewC1EP7QWidget", .sym_new = "_nds_settings_ctor",
       .lib = NDS_LIBNICKEL, .out = nh_symoutptr(real_settings_ctor),

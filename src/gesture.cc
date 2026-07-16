@@ -1,21 +1,20 @@
 // gesture.cc — app-wide input-gesture classification for per-gesture control.
 //
-// Nickel's tap page-turn path (ReadingView::nextPage/prevPage) is not PLT-hookable, so hooks
-// alone can't tell gestures apart: swipes and physical page-turn buttons both arrive via the
-// hookable *PageWithTimer pair, and a tap turn only shows up as an un-announced full-screen
-// render. This installs a Qt event filter on the application object (every event passes through
-// it) and classifies the most recent *finished* input:
-//   - a key press                                    -> BUTTON (physical page-turn buttons)
-//   - press->release that moved less than a threshold -> TAP (also records the tap x, so a tap
-//     turn can take its sweep direction from the tap position)
+// The goToNextPage/goToPrevPage hooks in nickeldissolve.cc arm every real turn and record its
+// direction, but they can't tell WHICH input caused it, and the per-gesture toggles
+// (nds_animate_on_tap/swipe/button) need that. So this installs a Qt event filter on the
+// application object (every event passes through it) and classifies the most recent *finished*
+// input:
+//   - a key press                                     -> BUTTON (physical page-turn buttons)
+//   - press->release that moved less than a threshold -> TAP
 //   - press->release that moved further               -> SWIPE
 // Touch events and their synthesized mouse events are both handled (whichever Nickel delivers);
 // they classify identically, so the last writer winning is harmless. The filter only observes —
 // every event is passed through unchanged.
 //
-// The sweep decision in nickeldissolve.cc pairs this with the arming hooks: an armed render with
-// a fresh BUTTON is a button turn, armed with anything else is a swipe, and an unarmed render
-// with a fresh TAP is a tap turn.
+// It also tracks whether the reader (ReadingView) is on screen, which the sweep logic uses as a
+// "we're in a book" guard. Direction is NOT derived here — it comes from which sink (goToNextPage
+// vs goToPrevPage) fired — so the recorded tap x is kept only for diagnostics.
 
 #include <QCoreApplication>
 #include <QEvent>
