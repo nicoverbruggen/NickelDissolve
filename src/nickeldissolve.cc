@@ -647,14 +647,18 @@ static struct nh_dlsym NickelDissolveDlsym[] = {
     //libnickel 4.6.9960 * _ZN13TouchCheckBoxC1EP7QWidget
     { .name = "_ZN13TouchCheckBoxC1EP7QWidget", .out = nh_symoutptr(nds_touchcheckbox_ctor),
       .desc = "TouchCheckBox ctor (native Reading-settings checkbox)", .optional = true },
-    // Device colour-panel query, for the glkw16 band-waveform choice. Both optional: if either is
-    // missing, nds_panel_is_color() reports mono and the sweep falls back to the reading waveform.
+    // Device colour-panel query, for the glkw16 band-waveform choice. Both optional AND independent:
+    // if EITHER is missing, nds_panel_is_color() reports mono and the sweep falls back to the reading
+    // waveform. hasColorDisplay was introduced in firmware 4.38.21908 and is absent on anything older;
+    // that absence is exactly the "no colour panel here" signal (colour hardware ships with 4.38+), so
+    // the .optional lookup is the device gate — no firmware-version check needed. Pre-4.38 / mono
+    // devices simply reuse GLR16, which is what they want anyway.
     //libnickel 4.6.9960 * _ZN6Device16getCurrentDeviceEv
     { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(real_getCurrentDevice),
       .desc = "Device::getCurrentDevice (the active device singleton)", .optional = true },
-    //libnickel 4.6.9960 * _ZNK6Device15hasColorDisplayEv
+    //libnickel 4.38.21908 * _ZNK6Device15hasColorDisplayEv (introduced 4.38.21908; absent on older fw)
     { .name = "_ZNK6Device15hasColorDisplayEv", .out = nh_symoutptr(real_hasColorDisplay),
-      .desc = "Device::hasColorDisplay (colour vs mono panel)", .optional = true },
+      .desc = "Device::hasColorDisplay (colour vs mono panel; firmware 4.38.21908+)", .optional = true },
     {0},
 };
 
