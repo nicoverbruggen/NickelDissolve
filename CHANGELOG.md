@@ -2,6 +2,12 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
+## Unreleased
+
+### Documentation
+
+- Recorded the first community hardware confirmation of the Kobo Libra 2: a REAGL-board unit (firmware 4.38.23697) animates well on the stock i.MX defaults (12 strips, REAGL waveform, 30000 µs). The Libra 2 stays unofficial/best-effort — a GLKW16-revision board is still unconfirmed in the field.
+
 ## v0.6
 
 The same animation, now tuned to each device out of the box.
