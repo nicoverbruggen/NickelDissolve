@@ -2,6 +2,19 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
+## v0.6
+
+The same animation, now tuned to each device out of the box.
+
+### Improved
+
+- **The animation is tuned per device.** The number of bands follows the panel size, so the 7-inch Libra Colour (and Libra 2) get more bands than the 6-inch Clara devices and the wipe reads at a comparable pace on each. The Libra Colour in particular is noticeably smoother.
+- **Crisper bands on colour (Kaleido) devices.** The Libra Colour and Clara Colour now sweep with a Kaleido B&W-optimised waveform, so the wipe looks sharper and turns a touch faster. Black-and-white devices are unchanged.
+
+### Changed
+
+- `nds_strips` now defaults to a per-device value (12 bands on 7-inch panels, 10 on 6-inch) instead of a fixed 8. Set it in the config to override, exactly as before.
+
 ## v0.5
 
 ### Fixed

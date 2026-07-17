@@ -17,8 +17,9 @@ sequence of partial refreshes, so it's a **stepped** wipe, not a perfectly smoot
 Three hooks, all resolved by symbol name (so no per-firmware offsets):
 
 - **`ReadingView::goToNextPage` / `goToPrevPage`** (in `libnickel`): the single sink every sequential page turn funnels into — a tap (`tapGesture` → `nextPage`), a swipe, and a physical button (`nextPageWithTimer`) all reach it through the PLT. They **arm the sweep** and record the **true direction** (which of the two fired; a backward turn sweeps the opposite way). Because it's the common sink, direction is Nickel's own decision rather than inferred, and non-turn renders (menus, book-open) never reach it, so they never arm.
-- **`ioctl`** (in `libkobo`): when a turn is armed, the next full-screen e-ink update is the page render; in `sweep` mode it's replaced with N swept partial-strip updates (except Kaleido *colour* pages, which are detected from their CFA flag bits and left to full-refresh normally; see `nds_debug_color_skip`). Each strip **reuses the turn's own waveform** (so whatever the device/page uses, whether GLR16, REAGL, or a Kaleido CFA mode, is preserved). The **last strip reuses Nickel's update marker**, so its following `WAIT_FOR_UPDATE_COMPLETE` resolves and there's no hang; a fallback resubmits the original if that strip fails.
+- **`ioctl`** (in `libkobo`): when a turn is armed, the next full-screen e-ink update is the page render; in `sweep` mode it's replaced with **N swept partial-strip updates** (except colour pages on Kaleido panels, which are detected from the update's waveform and left to full-refresh normally). The band count and band waveform are tuned per device (see *Per-device defaults*): a mono panel's strips reuse the turn's own greyscale waveform (GLR16/REAGL), while a Kaleido colour panel's strips use `glkw16`, a sharper Kaleido B&W mode. The **last strip reuses Nickel's update marker**, so its following `WAIT_FOR_UPDATE_COMPLETE` resolves and there's no hang; a fallback resubmits the original if that strip fails.
 - **Kobo-agnostic.** The two flat Kobo e-ink interfaces (`hwtcon` on MTK, `mxcfb` on i.MX) share the same update-struct prefix, so the mod recognises either by its `ioctl` number and drives it by field offset. There's no per-struct code. Any other interface (such as the AllWinner `sunxi` used by the Elipsa/Sage) is not handled: the mod stays inactive there. Screen dimensions are read from the update itself (resolution-independent).
+- **Device identification, no model list.** The two per-device dials are derived, not looked up. **Band count** follows the panel's longest edge, read straight from the update (7-inch panels get more bands than 6-inch), so same-size devices tune identically with nothing to maintain. The **colour-vs-mono** choice for the band waveform comes from `Device::getCurrentDevice()->hasColorDisplay()` in `libnickel`, resolved by symbol; if that symbol is ever missing the mod assumes mono. No firmware version, model id, or serial number is read from disk.
 
 ## How e-ink refreshes work
 
@@ -51,7 +52,7 @@ User settings (also documented on-device in `.adds/nickel-dissolve/doc`):
 | key | default | meaning |
 |---|---|---|
 | `nds_mode` | `sweep` | `sweep` = do the wipe; `observe` = passthrough + log only; `off` = fully inert |
-| `nds_strips` | 8 | number of vertical bands (2–32). More = smoother + slower |
+| `nds_strips` | *(auto, by panel size)* | number of vertical bands (2–32). More = smoother + slower. **Unset = per-device default** (12 on 7-inch panels, 10 on 6-inch; see below); set a value to override |
 | `nds_delay_us` | *(auto, per-platform)* | extra pause between strips, µs (0–50000); the animation-speed dial. **Unset = per-platform default** (see below); set a value to override |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); back turns flip automatically |
 | `nds_animate_on_swipe` | 1 | `0` = swipe turns don't animate |
@@ -63,7 +64,7 @@ defaults are correct per device:
 
 | key | default | meaning |
 |---|---|---|
-| `nds_debug_strip_waveform` | 0 = keep the turn's waveform | **0** reuses the turn's own waveform (best quality). Non-zero forces a raw, **platform-specific** id (hwtcon: 1=DU 3=GL16 4=GLR16 6=A2; mxcfb: REAGL=6 GC16=2) |
+| `nds_debug_strip_waveform` | 0 = per-device default | **0** uses the per-device band waveform (`glkw16` on colour panels, else reuse the turn's own waveform; see below). Non-zero forces a raw, **platform-specific** id (hwtcon: 1=DU 3=GL16 4=GLR16 8=glkw16; mxcfb: REAGL=6 GC16=2) |
 | `nds_debug_wait` | `submission` | between strips wait for `submission` (fast) or `complete` (slower, more discrete) |
 | `nds_debug_cfa_skip` | 1 | **Kaleido colour panels:** set `HWTCON_FLAG_CFA_SKIP` on the swept strips (skips the per-region CFA colour pass whose boundaries seam). Correct because only B&W reading turns are ever swept; no-op on mono/i.MX |
 | `nds_debug_force_bw` | 0 | **Kaleido colour panels:** `1` = force the **whole device** to greyscale by OR-ing `HWTCON_FLAG_CFA_SKIP` into *every* hwtcon update (menus, home, covers, reading). A full-B&W / accessibility switch, independent of the animation; also a quick way to confirm the panel's colour pipeline is the variable. No-op on mono/i.MX |
@@ -73,16 +74,35 @@ Verbose page-turn / ioctl tracing is controlled by the standard **`nds_log`** ke
 
 Tuning guide: leave `nds_debug_strip_waveform:0` for best quality; use `nds_strips`/`nds_delay_us` for smoothness/speed.
 
-### Per-platform defaults
+### Per-device defaults
 
-The two e-ink platforms need different pacing, so unset knobs fall back to a per-platform default (an explicit value in the config always wins). This is why the wipe looks right on each device out of the box:
+Unset knobs fall back to a default derived from the hardware, so the wipe looks right on each device out of the box (an explicit value in the config always wins). Three things are tuned.
 
-| Platform | `nds_delay_us` (unset) | `nds_debug_strip_waveform` (0) | why |
-|---|---|---|---|
-| hwtcon (Clara BW/Colour, Libra Colour) | 0 | keep the turn's (GLR16) | the driver's submission-wait already paces the strips |
-| mxcfb (Libra 2, Clara 2E) | 30000 | keep the turn's (REAGL) | no submission-wait, so strips need an explicit delay or the wipe is instant |
+**Band count — by panel size.** The longer the panel edge, the more bands, so each band covers a similar physical height and the wipe reads at a comparable pace on every device. The threshold is the panel's longest edge, read from the update itself:
 
-**Why the strips reuse the turn's own waveform:** it keeps every band a full-quality render (REAGL on a modern i.MX board, GLR16 on hwtcon) and automatically matches whatever the panel supports. The way to tune the feel is `nds_delay_us`, not a different waveform; `nds_debug_strip_waveform` can still force a specific one to experiment.
+| Panel | Example devices | `nds_strips` (unset) |
+|---|---|---|
+| longest edge ≥ 1600 px (7-inch and up) | Libra Colour, Libra 2 | 12 |
+| longest edge < 1600 px (6-inch) | Clara BW, Clara Colour, Clara 2E | 10 |
+
+**Band waveform — by panel type.** A Kaleido *colour* panel renders crisper, slightly faster B&W bands with `glkw16` (a Kaleido B&W-optimised waveform), so colour panels sweep with it; mono panels keep the turn's own greyscale waveform. The colour-vs-mono answer comes from `Device::hasColorDisplay()` (see *How it works*):
+
+| Panel | Example devices | Band waveform (unset) |
+|---|---|---|
+| Kaleido colour (hwtcon) | Libra Colour, Clara Colour | `glkw16` (raw id 8) |
+| mono (hwtcon) | Clara BW | reuse the turn's GLR16 |
+| mono (mxcfb) | Libra 2, Clara 2E | reuse the turn's REAGL |
+
+`glkw16` here is the raw *kernel* EPD id `8` that the mod writes into the update. Note that libkobo's `KoboScreenMTK` numbers waveforms differently (it calls id 8 `GCK16` and glkw16 `9`), so the kernel id and the libkobo name can look inconsistent — the kernel is the authority for what actually runs, and id 8 was confirmed by eye to be the sharp Kaleido B&W mode on the Libra Colour and Clara Colour. On a mono panel the strips reuse the turn's own waveform, which keeps every band a full-quality render and matches whatever the panel supports.
+
+**Inter-strip delay — by platform.** The two e-ink platforms pace themselves differently:
+
+| Platform | `nds_delay_us` (unset) | why |
+|---|---|---|
+| hwtcon (MediaTek) | 0 | the driver's submission-wait already paces the strips |
+| mxcfb (i.MX) | 30000 | no submission-wait, so strips need an explicit delay or the wipe is instant |
+
+To tune the feel, reach for `nds_strips` (smoothness) and `nds_delay_us` (speed) first; `nds_debug_strip_waveform` can still force a specific waveform to experiment.
 
 ## Per-gesture control
 

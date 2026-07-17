@@ -140,17 +140,15 @@ static const struct nds_platform *nds_active = nullptr;   // detected from the f
 
 static long nds_now() { return (long)time(nullptr); }
 
-// Timing instrumentation (verbose only): locate the "cold controller" first-band stutter by
-// correlating how long we sat idle with how long each band actually takes. Wall-clock µs; only
-// differences are used, so a clock step (unlikely on a reading device) at worst corrupts one line.
+// Idle tracking: the gap since the last e-ink SEND gates the cold-wake mitigations (the prewarm
+// sliver and the cold-skip). Wall-clock µs; only differences are used, so a clock step (unlikely on
+// a reading device) at worst mis-gates one turn.
 static uint64_t nds_now_us() {
     struct timeval tv; gettimeofday(&tv, nullptr);
     return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
 }
 static uint64_t nds_last_send_us = 0;        // last e-ink SEND the hook saw (turn, footer, clock, ...)
-static uint64_t nds_last_turn_us = 0;        // end of the last sweep (an actual page turn)
 static uint64_t nds_turn_idle_any_us  = 0;   // gap before this update since the previous update of any kind
-static uint64_t nds_turn_idle_page_us = 0;   // gap since the last page turn (how long we sat on the page)
 
 // ---- config -----------------------------------------------------------------------------
 // The config file is OPTIONAL: no file (or a missing key) means the defaults below. User keys
@@ -188,14 +186,49 @@ static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 static bool nds_verbose_compute() {
     if (nds_off()) return false;
     if (nds_mode_is("observe")) return true;
+    // In "sweep" mode, stay quiet unless the user opts in with nds_log:1, or the config had a
+    // problem (force-enabled so mistakes self-diagnose).
     return nds_global_config_bool("nds_log", false) || nds_config_problem_seen();
 }
-static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : 8; if (n < 2) n = 2; if (n > 32) n = 32; return n; }
+// ---- per-device animation tuning ---------------------------------------------------------
+// Two independent axes, chosen so same-size / same-panel devices tune identically with no model list
+// to maintain. Config keys (nds_strips, nds_debug_strip_waveform) still win over both.
+//   * Band count follows the panel's longest edge (learned from the full-screen updates below): the
+//     7" panels (Libra Colour / Libra 2, 1264x1680) get 12 bands; the 6" panels (Clara BW / Colour /
+//     2E / HD, 1072x1448) and anything unknown get 10.
+//   * The band waveform is glkw16 (a Kaleido B&W-optimised mode, crisper bands) on colour panels,
+//     decided by Device::getCurrentDevice()->hasColorDisplay(); mono panels keep their reading wf.
+static uint32_t nds_panel_max_dim = 0;   // longest panel edge seen so far (px); 0 until the first update
+static int nds_default_strips() {
+    return nds_panel_max_dim >= 1600 ? 12 : 10;   // 7" (…x1680) -> 12; 6" (…x1448) and unknown -> 10
+}
+// Device colour-panel query, via libnickel symbols resolved in NickelDissolveDlsym. Cached (the panel
+// can't change at runtime). Defaults to mono — no glkw16 — if the symbols are missing on an unfamiliar
+// firmware, which is the safe choice since glkw16 is only correct on a Kaleido colour panel.
+static void *(*real_getCurrentDevice)() = nullptr;
+static bool  (*real_hasColorDisplay)(void *self) = nullptr;
+static bool nds_panel_is_color() {
+    static int cached = -1;                       // -1 = not resolved yet, 0 = mono, 1 = colour
+    if (cached < 0 && real_getCurrentDevice && real_hasColorDisplay) {
+        void *dev = real_getCurrentDevice();
+        if (dev) cached = real_hasColorDisplay(dev) ? 1 : 0;
+    }
+    return cached == 1;
+}
+// Band waveform when nds_debug_strip_waveform is unset. glkw16 is the raw kernel EPD id 8 (validated
+// by eye on the Libra Colour and Clara Colour); cfa_field gates it to the hwtcon/Kaleido interface,
+// since id 8 means something else on mxcfb. 0 = reuse the update's own waveform (hwtcon GLR16, mxcfb
+// REAGL). libkobo's KoboScreenMTK numbers modes differently (see nds_wf_name) — this is intentional.
+static uint32_t nds_default_strip_wf(const struct nds_platform *plat) {
+    if (plat->cfa_field && nds_panel_is_color()) return 8u;   // glkw16, colour Kaleido panels only
+    return plat->def_strip_wf;
+}
+static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : nds_default_strips(); if (n < 2) n = 2; if (n > 32) n = 32; return n; }
 // Cold-controller mitigation (default off): when the EPD has been idle long enough to power down,
 // the next swept turn stutters on band 0 while the panel re-powers. If the idle since the last
 // e-ink update exceeds this many ms, pass Nickel's own full refresh through for that one turn
-// (clean, no stutter) instead of animating it. 0 = disabled (always sweep). Set from the measured
-// power-down knee once known (see the BANDTIME log).
+// (clean, no stutter) instead of animating it. 0 = disabled (always sweep). Superseded by the
+// prewarm sliver (nds_prewarm_ms) when that is set.
 static int  nds_cold_skip_ms() { const char *v = nds_global_config_get("nds_cold_skip_ms"); int n = (v && *v) ? atoi(v) : 0; if (n < 0) n = 0; return n; }
 // Cold-controller pre-warm (default off): the better cold handler. When the panel has been idle this
 // many ms it has powered down, so the first update pays a ~40ms wake. Instead of skipping the
@@ -285,8 +318,8 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     const uint32_t W  = rd32(orig, OFF_WIDTH), H = rd32(orig, OFF_HEIGHT);
     const int N = nds_strips();
     const uint32_t sw = W / (uint32_t)N;
-    uint32_t wf_override = nds_strip_wf();            // config override wins; 0 = use platform default
-    if (wf_override == 0) wf_override = plat->def_strip_wf;   // per-platform fast band waveform (0 = reuse)
+    uint32_t wf_override = nds_strip_wf();                     // config override wins
+    if (wf_override == 0) wf_override = nds_default_strip_wf(plat);   // else per-device default (colour: glkw16)
     const int delay = nds_delay_us((int)plat->def_delay_us);   // config wins; else per-platform default
     const bool want_complete = nds_wait_complete();
     bool rtl = nds_rtl();
@@ -314,8 +347,8 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
             if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);
             uint32_t mk = nds_ephemeral_marker + 0x200u;   // ephemeral, clear of the strip markers below
             wr32(v, OFF_MARKER, mk);
-            uint64_t st0 = nds_now_us();                        // time the sliver's own submit+wait, so we
-            int rc = real_ioctl(fd, plat->send, v);             // learn its cost warm (cheap) vs cold (~wake).
+            uint64_t st0 = nds_now_us();                        // time the sliver's own submit+wait, so the
+            int rc = real_ioctl(fd, plat->send, v);             // PREWARM log shows it warm (cheap) vs cold (~wake).
             if (rc >= 0 && plat->wait_sub) { uint32_t wm = mk; real_ioctl(fd, plat->wait_sub, &wm); }
             unsigned long sliver_us = (unsigned long)(nds_now_us() - st0);
             if (nds_verbose_enabled)   // uncapped: a whole reading session is what we want to sample
@@ -326,7 +359,6 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     }
 
     bool m_ok = false;
-    uint64_t bt[32] = {0};   // per-band send+wait cost, µs (N is clamped to <=32); [0] holds the cold-band cost
     for (int k = 0; k < N; k++) {
         int col = rtl ? (N - 1 - k) : k;
         uint32_t left  = x0 + (uint32_t)col * sw;
@@ -343,8 +375,7 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
         uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
         wr32(v, OFF_MARKER, mk);
 
-        uint64_t t0 = nds_now_us();                  // cost of this band = submit + wait (the cold-controller
-        if (real_ioctl(fd, plat->send, v) < 0) continue;   // re-power stall, if any, lands inside band 0 here)
+        if (real_ioctl(fd, plat->send, v) < 0) continue;
         if (mk == M) m_ok = true;
 
         if (want_complete) {                         // wait for full render between strips
@@ -354,30 +385,15 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
             uint32_t wm = mk;
             real_ioctl(fd, plat->wait_sub, &wm);
         }                                            // mxcfb: no wait needed (no MDP merge)
-        bt[k] = nds_now_us() - t0;                   // excludes the inter-band delay below
         if (delay > 0 && !last) usleep((useconds_t)delay);
     }
     // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
     if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
     nds_ephemeral_marker += (uint32_t)N;
 
-    // The measurement: how long we sat idle vs how much band 0 cost relative to the warm bands. If
-    // band 0 balloons past the rest as idle_page grows, that's the cold re-power landing on band 0.
-    uint64_t end_us = nds_now_us();
-    if (nds_verbose_enabled) {
-        uint64_t rest_sum = 0, rest_max = 0; int rest_n = 0;
-        for (int k = 1; k < N; k++) { rest_sum += bt[k]; if (bt[k] > rest_max) rest_max = bt[k]; rest_n++; }
-        unsigned long rest_avg = rest_n ? (unsigned long)(rest_sum / (uint64_t)rest_n) : 0ul;
-        NDS_LOG("BANDTIME [%s] idle_page=%lums idle_any=%lums | band0=%luus rest_avg=%luus rest_max=%luus | N=%d wait=%s",
-                plat->name,
-                (unsigned long)(nds_turn_idle_page_us / 1000ull),
-                (unsigned long)(nds_turn_idle_any_us / 1000ull),
-                (unsigned long)bt[0], rest_avg, (unsigned long)rest_max, N,
-                want_complete ? "complete" : (plat->wait_sub ? "submission" : "none"));
-    }
-    // The strips were the last real panel activity; anchor the next turn's idle gaps to now.
-    nds_last_turn_us = end_us;
-    nds_last_send_us = end_us;
+    // The strips bypass this hook (they call real_ioctl directly), so anchor the next turn's idle gap
+    // to now; otherwise idle_any would measure from before this sweep and mis-fire the cold-wake path.
+    nds_last_send_us = nds_now_us();
 }
 
 // ---- per-gesture gating -------------------------------------------------------------------
@@ -402,14 +418,17 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     const struct nds_platform *plat = nds_match(request);
     if (plat && argp) nds_active = plat;
 
-    // Idle tracking (for the band-timing log below): record the gap before every e-ink SEND, both
-    // since the previous update of any kind (footer/clock keep the controller warm) and since the
-    // last actual page turn (how long we sat on the page). Our own strips bypass this hook.
+    // Idle tracking: record the gap before every e-ink SEND since the previous update of any kind
+    // (footer/clock keep the controller warm). This gates the cold-wake mitigations (prewarm sliver,
+    // cold-skip). Our own sweep strips bypass this hook, so nds_do_sweep re-anchors nds_last_send_us.
     if (plat && argp && request == plat->send) {
         uint64_t now_us = nds_now_us();
-        nds_turn_idle_any_us  = nds_last_send_us ? (now_us - nds_last_send_us) : 0;
-        nds_turn_idle_page_us = nds_last_turn_us ? (now_us - nds_last_turn_us) : 0;
+        nds_turn_idle_any_us = nds_last_send_us ? (now_us - nds_last_send_us) : 0;
         nds_last_send_us = now_us;
+        // Learn the panel's longest edge from full-screen updates; it drives the band count.
+        const uint8_t *u = (const uint8_t *)argp;
+        uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT), md = w > h ? w : h;
+        if (md >= 512 && md > nds_panel_max_dim) nds_panel_max_dim = md;
     }
 
     // Force-B&W: OR CFA_SKIP into every hwtcon update so the whole device renders greyscale.
@@ -479,7 +498,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     static int swept = 0;
                     if (nds_verbose_enabled && swept < 40) { swept++;
                         NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                                wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : plat->def_strip_wf),
+                                wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : nds_default_strip_wf(plat)),
                                 nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                                 (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                     }
@@ -523,7 +542,8 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
         }
     }
 
-    if (real_ioctl) return real_ioctl(fd, request, argp);
+    if (real_ioctl)
+        return real_ioctl(fd, request, argp);
     if (!nds_safety_disabled) { nds_safety_disabled = true; NDS_LOG("SAFETY: real ioctl NULL"); }
     return -1;
 }
@@ -566,13 +586,15 @@ static int nds_init() {
     NDS_LOG("startup: NickelDissolve " NH_VERSION);
     nds_log_firmware();
     nds_log_hwconfig();
+    NDS_LOG("startup: auto-tuning -> band count by panel size (7\"=12 bands, 6\"=10), glkw16 band waveform on colour panels");
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.
     bool gf = nds_gesture_filter_install();
-    NDS_LOG("startup: mode=%s strips=%d dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d verbose=%d "
+    const char *scfg = nds_global_config_get("nds_strips");
+    NDS_LOG("startup: mode=%s strips=%s dir=%s delay=%s animate(swipe/tap/button)=%d/%d/%d gesture_filter=%d verbose=%d "
             "| debug: strip_wf=%u(0=keep) wait=%s cfa_skip=%d force_bw=%d sweep_any_wf=%d",
-            nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), nds_strips(),
+            nds_off() ? "off" : (nds_sweep_mode() ? "SWEEP" : "observe"), (scfg && *scfg) ? scfg : "auto(by panel)",
             nds_rtl() ? "R->L" : "L->R", (dcfg && *dcfg) ? dcfg : "auto(per-platform)",
             nds_animate_swipe(), nds_animate_tap(), nds_animate_button(), gf, nds_verbose_enabled,
             nds_strip_wf(), nds_wait_complete() ? "complete" : "submission",
@@ -625,6 +647,14 @@ static struct nh_dlsym NickelDissolveDlsym[] = {
     //libnickel 4.6.9960 * _ZN13TouchCheckBoxC1EP7QWidget
     { .name = "_ZN13TouchCheckBoxC1EP7QWidget", .out = nh_symoutptr(nds_touchcheckbox_ctor),
       .desc = "TouchCheckBox ctor (native Reading-settings checkbox)", .optional = true },
+    // Device colour-panel query, for the glkw16 band-waveform choice. Both optional: if either is
+    // missing, nds_panel_is_color() reports mono and the sweep falls back to the reading waveform.
+    //libnickel 4.6.9960 * _ZN6Device16getCurrentDeviceEv
+    { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(real_getCurrentDevice),
+      .desc = "Device::getCurrentDevice (the active device singleton)", .optional = true },
+    //libnickel 4.6.9960 * _ZNK6Device15hasColorDisplayEv
+    { .name = "_ZNK6Device15hasColorDisplayEv", .out = nh_symoutptr(real_hasColorDisplay),
+      .desc = "Device::hasColorDisplay (colour vs mono panel)", .optional = true },
     {0},
 };
 

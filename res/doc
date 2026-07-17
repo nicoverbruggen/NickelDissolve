@@ -33,7 +33,7 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | key | default | meaning |
 |---|---|---|
 | `nds_mode` | `sweep` | `sweep` = animate page turns; `observe` = don't animate, just log; `off` = do nothing at all |
-| `nds_strips` | `8` | number of vertical bands (2–32); more = smoother but slower |
+| `nds_strips` | auto | number of vertical bands (2–32); more = smoother but slower. Unset picks a per-device default (12 on 7-inch panels, 10 on 6-inch) |
 | `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000); the speed dial, raise to slow the wipe down |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); backward turns flip automatically |
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |

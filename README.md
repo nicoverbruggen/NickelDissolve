@@ -68,4 +68,4 @@ Curious how it works, what every configuration value (including the `nds_debug_*
 
 ## Credits
 
-Built on [NickelHook](https://github.com/pgaskin/NickelHook) by Patrick Gaskin. This mod was created by the author with the help of the some large language models, including Anthropic's Opus and Fable. Tested on the author's own devices and some Kobo's by members of the community. Thank you!
+Built on [NickelHook](https://github.com/pgaskin/NickelHook) by Patrick Gaskin. This mod was created by the author with the help of some large language models, including Anthropic's Opus and Fable. Tested on the author's own devices and some Kobos by members of the community. Thank you!
