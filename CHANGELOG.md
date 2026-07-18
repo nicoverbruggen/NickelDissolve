@@ -2,6 +2,12 @@
 
 All notable, user-visible changes to NickelDissolve. Release notes are generated from this file: each `## vX.Y` heading must exactly match a git tag.
 
+## v0.7
+
+### Fixed
+
+- **Page turns now animate in Dark Mode.** In Dark Mode the reader draws each page turn with a different, darker waveform, which the mod didn't recognise as a reading turn, so a dark-mode turn fell back to a plain refresh with no sweep. Those turns now animate the same as in day mode. On colour (Kaleido) devices the bands use the matching dark waveform so they stay sharp and don't ghost; on black-and-white devices they reuse the turn's own dark waveform. Confirmed on the Clara BW and Clara Colour.
+
 ## v0.6
 
 The same animation, now tuned to each device out of the box.

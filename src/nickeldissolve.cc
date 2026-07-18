@@ -1,22 +1,22 @@
-// NickelDissolve — a Kobo-agnostic page-turn "band wipe".
+// NickelDissolve: a Kobo-agnostic page-turn "band wipe".
 //
 // A Kindle page turn sweeps the new page in as a directional wipe (a native MediaTek hardware
 // "swipe" the Kobo drivers don't expose). NickelDissolve approximates it from userspace: it takes
 // the single full-screen e-ink update Nickel issues per page turn and replaces it with a SEQUENCE
 // of partial updates over vertical strips, swept across the screen, so the new page appears
-// strip-by-strip. Only the driver's public update ioctl is used — no driver patching.
+// strip-by-strip. Only the driver's public update ioctl is used, with no driver patching.
 //
 // PLATFORM-AGNOSTIC. Kobo has two e-ink update interfaces with the SAME update-struct prefix
-// (region@0, waveform_mode@16, update_mode@20, update_marker@24 — hwtcon was modelled on mxcfb):
-//   * hwtcon (MTK)  — Clara BW/Colour, Libra Colour, Elipsa 2E : HWTCON_SEND_UPDATE 0x4024462E
-//   * mxcfb  (i.MX) — Libra 2 & most pre-2024                  : MXCFB_SEND_UPDATE  0x4048462E
+// (region@0, waveform_mode@16, update_mode@20, update_marker@24; hwtcon was modelled on mxcfb):
+//   * hwtcon (MTK), Clara BW/Colour, Libra Colour, Elipsa 2E: HWTCON_SEND_UPDATE 0x4024462E
+//   * mxcfb (i.MX), Libra 2 & most pre-2024: MXCFB_SEND_UPDATE 0x4048462E
 // We recognise either by its ioctl number and drive it by field offset, so no per-struct code.
 //
 // TRIGGER. Instead of gating on a specific waveform (MTK-only, and wrong for colour/CFA pages), we
-// mark a turn "pending" from ReadingView::goToNextPage/goToPrevPage — the single sink every turn
-// (tap, swipe, button) funnels into, so it also gives the true direction — and sweep the next
+// mark a turn "pending" from ReadingView::goToNextPage/goToPrevPage, the single sink every turn
+// (tap, swipe, button) funnels into, so it also gives the true direction, and sweep the next
 // full-screen update. We REUSE that update's own waveform, so whatever the device/page uses (GLR16,
-// REAGL, a Kaleido CFA mode…) is preserved — the wipe is just that update, chopped into swept strips.
+// REAGL, a Kaleido CFA mode…) is preserved; the wipe is just that update, chopped into swept strips.
 //
 // NO HANG. Nickel does WAIT_FOR_UPDATE_COMPLETE(M) after the turn; the LAST strip reuses its marker
 // M, so that wait resolves. If the last strip fails to submit, we resubmit the original update.
@@ -25,7 +25,7 @@
 // logging) and "off" (fully inert) as fallbacks. Only the hwtcon and mxcfb interfaces are handled; any
 // other device (e.g. AllWinner/sunxi) is left untouched and reads as unsupported. In "sweep",
 // only a full-screen update that immediately follows a page turn is ever touched; everything else
-// passes byte-for-byte. Worst case of a bad sweep is a garbled frame fixed by the next refresh —
+// passes byte-for-byte. Worst case of a bad sweep is a garbled frame fixed by the next refresh,
 // recoverable, not a brick. The config file is optional; without one the defaults apply.
 
 #include <cstdlib>
@@ -52,11 +52,11 @@ static const char *const NDS_LIBNICKEL = "/usr/local/Kobo/libnickel.so.1.0.0";
 enum { OFF_TOP = 0, OFF_LEFT = 4, OFF_WIDTH = 8, OFF_HEIGHT = 12,
        OFF_WAVEFORM = 16, OFF_UPDMODE = 20, OFF_MARKER = 24 };
 enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
-#define WF_GC16 2u                    // GC16 (full black-flash mode) — id 2 on BOTH hwtcon and mxcfb
+#define WF_GC16 2u                    // GC16 (full black-flash mode), id 2 on BOTH hwtcon and mxcfb
 #define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
 #define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
 #define NDS_PREWARM_PX     2          // width of the cold-wake lead-in sliver (a hairline; the driver
-                                      // validates region bounds only, no min width — see hwtcon dump)
+                                      // validates region bounds only, no min width; see hwtcon dump)
 
 // ---- platform table: which ioctls carry an e-ink update, per driver ----
 struct nds_platform {
@@ -68,7 +68,7 @@ struct nds_platform {
     uint32_t      flags_off;   // byte offset of the `flags` field in the update struct
     uint32_t      cfa_skip;    // CFA-skip flag bit (skips the per-region colour pass; 0 = n/a)
     uint32_t      cfa_field;   // mask of the CFA colour-mode field inside `flags` (0 = no CFA;
-                               // hwtcon: HWTCON_FLAG_CFA_FLDS_MASK 0x7f00 — non-zero means the
+                               // hwtcon: HWTCON_FLAG_CFA_FLDS_MASK 0x7f00, non-zero means the
                                // update runs the driver's CFA colour pass, i.e. a COLOUR page)
     bool          flash_full;  // how a full-flash refresh is flagged: true = update_mode==FULL (i.MX,
                                // where the reading turn is PARTIAL); false = by the GC16 waveform
@@ -78,30 +78,25 @@ struct nds_platform {
                                // submission-wait, so it needs an explicit delay or the wipe is instant
     uint32_t      dith_off;    // byte offset of dither_mode in the update struct (0 = don't log it):
                                // hwtcon_update_data has int dither_mode right after flags (@0x20)
-    uint32_t      read_wf;     // platform's flashless greyscale reading waveform (hwtcon: GLR16=4;
-                               // mxcfb: REAGL=6). Currently unused: it was the target of the
-                               // first-turn GC16->sweep conversion, which has been removed.
     uint32_t      def_strip_wf;// waveform to draw the swept bands with when nds_debug_strip_waveform is
-                               // unset. 0 = reuse the update's own waveform. Where reusing the native
-                               // reading waveform for every band is too slow (i.MX), use a fast wipe
-                               // waveform (DU) here and set settle_native below; the fast bands are then
-                               // just throwaway motion. nds_debug_strip_waveform overrides per device.
+                               // unset. 0 = reuse the update's own waveform (see nds_default_strip_wf,
+                               // which also applies the per-panel day/dark choice on colour Kaleido).
 };
 static const struct nds_platform NDS_PLATFORMS[] = {
     // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
     // CFA colour-mode field = HWTCON_FLAG_CFA_FLDS_MASK 0x7f00 (G1=0x100, AIE_S4=0x200, ...,
-    // NTX=0xa00, NTX_SF=0xb00 — 0 means no colour processing for this update).
+    // NTX=0xa00, NTX_SF=0xb00; 0 means no colour processing for this update).
     // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
     // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 4, 0 },
+    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 0 },
     // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
     // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
     // No submission-wait to pace strips, so default to ~30 ms/strip. def_strip_wf = 0: the strips REUSE
     // the turn's own waveform, i.e. whatever high-quality greyscale mode Nickel picked for the page
     // (REAGL on panels that support it), so each band is a full-quality, flashless render and we use
-    // the panel's best refresh automatically without hardcoding one (this is the v0.3 behaviour). Where
-    // reusing REAGL per band is too slow, nds_debug_strip_waveform:1 forces the faster DU wipe.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  6, 0 },
+    // the panel's best refresh automatically without hardcoding one. Where reusing REAGL per band is
+    // too slow, nds_debug_strip_waveform:1 forces the faster DU wipe.
+    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  0 },
 };
 static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
 
@@ -155,7 +150,7 @@ static uint64_t nds_turn_idle_any_us  = 0;   // gap before this update since the
 // (nds_mode, nds_strips, nds_delay_us, nds_direction, nds_animate_on_*) are documented in the
 // on-device doc; nds_debug_* keys are for debugging and documented in ABOUT.md only.
 //
-// nds_mode: "sweep" (DEFAULT — the wipe is on out of the box), "observe" (passthrough + log the
+// nds_mode: "sweep" (DEFAULT, the wipe is on out of the box), "observe" (passthrough + log the
 // ioctl stream), or "off" (fully inert, no logging). Anything else falls back to sweep.
 static bool nds_mode_is(const char *m) { const char *v = nds_global_config_get("nds_mode"); return v && !strcasecmp(v, m); }
 // Runtime enable flag driven by the Reading-settings toggle (settingsui.cc): -1 = follow the
@@ -203,7 +198,7 @@ static int nds_default_strips() {
     return nds_panel_max_dim >= 1600 ? 12 : 10;   // 7" (…x1680) -> 12; 6" (…x1448) and unknown -> 10
 }
 // Device colour-panel query, via libnickel symbols resolved in NickelDissolveDlsym. Cached (the panel
-// can't change at runtime). Defaults to mono — no glkw16 — if the symbols are missing on an unfamiliar
+// can't change at runtime). Defaults to mono (no glkw16) if the symbols are missing on an unfamiliar
 // firmware, which is the safe choice since glkw16 is only correct on a Kaleido colour panel.
 static void *(*real_getCurrentDevice)() = nullptr;
 static bool  (*real_hasColorDisplay)(void *self) = nullptr;
@@ -215,13 +210,16 @@ static bool nds_panel_is_color() {
     }
     return cached == 1;
 }
-// Band waveform when nds_debug_strip_waveform is unset. glkw16 is the raw kernel EPD id 8 (validated
-// by eye on the Libra Colour and Clara Colour); cfa_field gates it to the hwtcon/Kaleido interface,
-// since id 8 means something else on mxcfb. 0 = reuse the update's own waveform (hwtcon GLR16, mxcfb
-// REAGL). libkobo's KoboScreenMTK numbers modes differently (see nds_wf_name) — this is intentional.
-static uint32_t nds_default_strip_wf(const struct nds_platform *plat) {
-    if (plat->cfa_field && nds_panel_is_color()) return 8u;   // glkw16, colour Kaleido panels only
-    return plat->def_strip_wf;
+// Band waveform when nds_debug_strip_waveform is unset. On a colour Kaleido panel the crisp band mode
+// is kernel EPD id 8 while the reader is in day mode (turn GLR16); in dark mode the turn is GLKW16 and
+// id 8 ghosts, so the bands must use GLKW16 to match the dark reading waveform. cfa_field gates this to
+// the hwtcon/Kaleido interface, since those ids name other modes on mxcfb. On mono hwtcon and i.MX the
+// default is 0: reuse the turn's own waveform, which is already the right day/dark mode.
+// Literal ids: the WF_* macros are defined further down; 8 = day band, 9 = GLKW16 dark band.
+static uint32_t nds_default_strip_wf(const struct nds_platform *plat, uint32_t turn_wf) {
+    if (plat->cfa_field && nds_panel_is_color())
+        return (turn_wf == 9u) ? 9u : 8u;   // dark turn (GLKW16) gets the dark band; else the day band
+    return plat->def_strip_wf;              // mono hwtcon / i.MX: 0 = reuse the turn's own waveform
 }
 static int  nds_strips()      { const char *v = nds_global_config_get("nds_strips"); int n = (v && *v) ? atoi(v) : nds_default_strips(); if (n < 2) n = 2; if (n > 32) n = 32; return n; }
 // Cold-controller mitigation (default off): when the EPD has been idle long enough to power down,
@@ -239,10 +237,10 @@ static int  nds_prewarm_ms()   { const char *v = nds_global_config_get("nds_prew
 static bool nds_rtl()         { const char *d = nds_global_config_get("nds_direction"); return !(d && !strcasecmp(d, "ltr")); }
 static bool nds_wait_complete(){ const char *w = nds_global_config_get("nds_debug_wait"); return w && !strcasecmp(w, "complete"); }
 // Inter-strip delay. If nds_delay_us is set in config it always wins; if it's absent, fall back to
-// the caller's per-platform default (hwtcon 0 — paced by the submission-wait; mxcfb ~30 ms — no
+// the caller's per-platform default (hwtcon 0, paced by the submission-wait; mxcfb ~30 ms, no
 // submission-wait, else the wipe is instant). Returns µs, clamped to [0, 50000].
 static int  nds_delay_us(int def) { const char *v = nds_global_config_get("nds_delay_us"); int d = (v && *v) ? atoi(v) : def; if (d < 0) d = 0; if (d > 50000) d = 50000; return d; }
-// Per-gesture control: which page-turn gestures animate. DEFAULT: all of them — always use the
+// Per-gesture control: which page-turn gestures animate. DEFAULT: all of them, always use the
 // transition when possible. Every real next/prev turn arms via the goToNextPage/goToPrevPage
 // hooks (taps, swipes, and physical buttons all funnel through them), which also record the true
 // direction; the app-wide Qt event filter (gesture.cc) only supplies the input TYPE, so each
@@ -251,7 +249,7 @@ static bool nds_animate_swipe()  { return nds_global_config_bool("nds_animate_on
 static bool nds_animate_tap()    { return nds_global_config_bool("nds_animate_on_tap", true); }
 static bool nds_animate_button() { return nds_global_config_bool("nds_animate_on_button", true); }
 // Set HWTCON_FLAG_CFA_SKIP on the strips (Kaleido): skips the per-region CFA colour pass whose
-// region boundaries produce the seams. Correct for B&W content (no colour to convert) — and we
+// region boundaries produce the seams. Correct for B&W content (no colour to convert), and we
 // only ever sweep B&W reading turns (see nds_wf_sweepable), so this is exactly right.
 static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_skip", true); }
 // Force the WHOLE device to greyscale: OR HWTCON_FLAG_CFA_SKIP into every hwtcon update (menus,
@@ -259,7 +257,7 @@ static bool nds_cfa_skip()    { return nds_global_config_bool("nds_debug_cfa_ski
 // full-B&W-mode switch, independent of the animation. No-op on mono/i.MX. See nds_force_bw use.
 static bool nds_force_bw()    { return nds_global_config_bool("nds_debug_force_bw", false); }
 // 0 = keep the turn's own waveform (platform-agnostic default); >0 = force a raw waveform id
-// (PLATFORM-SPECIFIC — e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
+// (PLATFORM-SPECIFIC: e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
 
 // hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
@@ -268,6 +266,8 @@ static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debu
 #define WF_DU 1u
 #define WF_GL16 3u
 #define WF_GLR16 4u
+#define WF_GCK16 8u                  // dark-mode flash (the GC16 counterpart when the reader is in dark mode)
+#define WF_GLKW16 9u                 // dark-mode reading turn (the GLR16 counterpart in dark mode)
 #define WF_GCC16 10u
 #define WF_GLRC16 11u
 // Whether an update carrying this waveform should be swept. THE colour guard, validated against
@@ -286,7 +286,11 @@ static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
     if (nds_global_config_bool("nds_debug_sweep_any_waveform", false)) return wf != WF_GC16;
     if (plat->cfa_field == 0)                              // mono (i.MX): flashless greyscale reading modes
         return wf == 5u || wf == 6u || wf == 7u || wf == 10u;  // GL16 / REAGL / REAGLD / GLKW16 (i.MX ids)
-    return wf == WF_GL16 || wf == WF_GLR16;                // Kaleido-capable: greyscale reading only
+    // Kaleido-capable (MTK/hwtcon): greyscale reading turns only. Day mode turns are GL16/GLR16; the
+    // reader's dark mode emits the same turn as GLKW16 (the "REAGL DARK" waveform), so it sweeps too.
+    // GCK16 (dark flash), GCC16/GLRC16 (colour) stay rejected. cfa_field is non-zero for all hwtcon,
+    // so this branch covers both mono and colour MTK panels.
+    return wf == WF_GL16 || wf == WF_GLR16 || wf == WF_GLKW16;
 }
 // i.MX (mxcfb) and MTK (hwtcon) number their waveform modes differently, so the name is
 // platform-dependent. i.MX numbering is from koreader's mxcfb-kobo.h; the WF_* constants below are
@@ -318,8 +322,9 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
     const uint32_t W  = rd32(orig, OFF_WIDTH), H = rd32(orig, OFF_HEIGHT);
     const int N = nds_strips();
     const uint32_t sw = W / (uint32_t)N;
+    const uint32_t turn_wf = rd32(orig, OFF_WAVEFORM);
     uint32_t wf_override = nds_strip_wf();                     // config override wins
-    if (wf_override == 0) wf_override = nds_default_strip_wf(plat);   // else per-device default (colour: glkw16)
+    if (wf_override == 0) wf_override = nds_default_strip_wf(plat, turn_wf);   // else per-device default (colour day: 8, dark: GLKW16)
     const int delay = nds_delay_us((int)plat->def_delay_us);   // config wins; else per-platform default
     const bool want_complete = nds_wait_complete();
     bool rtl = nds_rtl();
@@ -401,7 +406,7 @@ static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t 
 // goToPrevPage hooks already armed the turn and recorded the true direction; this only maps the
 // last input the Qt filter saw (gesture.cc) to that gesture's on/off toggle. A center tap that
 // merely raises the reading menu never reaches goToNextPage, so it never arms and never gets
-// here — no tap-position or zone guessing is involved. If the filter isn't up yet, or the input
+// here; no tap-position or zone guessing is involved. If the filter isn't up yet, or the input
 // is stale/unknown, treat it as a swipe (the common case) so the turn still animates by default.
 static bool nds_gesture_animate() {
     long gts = 0; int tap_x = -1;
@@ -452,9 +457,13 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             bool armed = nds_turn_pending != 0;             // a genuine next/prev turn; nds_turn_dir is set
             nds_turn_pending = 0;                           // consume the trigger (one per turn)
             // A flash is a GC16 update (hwtcon) or, on i.MX where the reading turn is PARTIAL, any
-            // update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear).
+            // update_mode==FULL refresh (the AUTO/GC16 chapter/ghost-clear). In the reader's dark mode
+            // the hwtcon flash is GCK16 (the GC16 counterpart), so count it too, keeping it out of the
+            // sweep and the settle tracking. Gated to hwtcon (cfa_field != 0) because id 8 is DU4 on
+            // i.MX, not a flash.
             uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
-            bool is_flash = (wf == WF_GC16) || (plat->flash_full && md == UPD_FULL);
+            bool is_flash = (wf == WF_GC16) || (plat->cfa_field && wf == WF_GCK16)
+                         || (plat->flash_full && md == UPD_FULL);
             // Book-open / chapter-jump settle (see nds_flash_seq): an unarmed full-screen flash
             // records the gesture that caused it; the next full-screen content render from that SAME
             // gesture is the open/jump settle and must not animate. A real turn is armed, so a turn's
@@ -498,7 +507,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     static int swept = 0;
                     if (nds_verbose_enabled && swept < 40) { swept++;
                         NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
-                                wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : nds_default_strip_wf(plat)),
+                                wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : nds_default_strip_wf(plat, wf)),
                                 nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                                 (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                     }
@@ -507,17 +516,20 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                 }
             } else {
                 // Passed through: a real turn whose gesture is disabled or isn't a B&W reading turn,
-                // or an unarmed menu/open render. Log the armed cases so a "turn didn't animate"
-                // report is diagnosable (armed=1 but want_anim=0 means the gesture toggle is off or
-                // the filter mis-classified; a flash/colour turn shows wf).
+                // or an unarmed menu/open render. The log spells out why an armed turn didn't animate:
+                // want_anim=0 means the gesture toggle is off (or the filter mis-classified); is_flash=1
+                // is a GC16/GCK16 or full refresh; sweepable=0 means the waveform isn't a reading turn
+                // (a colour page, or a mode we don't sweep). flags shows the CFA colour-mode field
+                // (0 on a greyscale page), so a mis-detected colour turn is visible too.
                 if (nds_verbose_enabled && armed) {
                     static int n = 0;
                     if (n < 40) { n++;
                         long gts = 0; int tx = -1;
                         enum nds_gesture g = nds_gesture_last(&gts, &tx);
-                        NDS_LOG("no-anim [%s] %ux%u dir=%s gesture=%s age=%lds wf=%u(%s) want_anim=%d -> passthrough",
+                        NDS_LOG("no-anim [%s] %ux%u dir=%s gesture=%s age=%lds wf=%u(%s) mode=%s flags=0x%x is_flash=%d sweepable=%d want_anim=%d -> passthrough",
                                 plat->name, w, h, nds_turn_dir ? "back" : "fwd", nds_gesture_name(g),
-                                nds_now() - gts, wf, nds_wf_name(wf, plat), want_anim);
+                                nds_now() - gts, wf, nds_wf_name(wf, plat), md == UPD_FULL ? "FULL" : "PARTIAL",
+                                rd32(u, plat->flags_off), is_flash ? 1 : 0, nds_wf_sweepable(plat, wf) ? 1 : 0, want_anim);
                     }
                 }
             }
@@ -552,7 +564,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 // ReadingView::goToNextPage / goToPrevPage are the single sink every sequential page turn funnels
 // into: a tap goes tapGesture -> nextPage -> goToNextPage, a swipe or physical button goes
 // nextPageWithTimer -> goToNextPage, all via the PLT, so hooking this pair catches every turn type
-// and records its true direction — no tap-position or tap-zone guessing. Chapter jumps and book
+// and records its true direction, with no tap-position or tap-zone guessing. Chapter jumps and book
 // opens use other paths, so they never arm here. These run on the UI thread, so they double as a
 // safe retry point for installing the gesture filter in case Qt didn't exist yet at plugin init.
 extern "C" __attribute__((visibility("default")))
@@ -651,7 +663,7 @@ static struct nh_dlsym NickelDissolveDlsym[] = {
     // if EITHER is missing, nds_panel_is_color() reports mono and the sweep falls back to the reading
     // waveform. hasColorDisplay was introduced in firmware 4.38.21908 and is absent on anything older;
     // that absence is exactly the "no colour panel here" signal (colour hardware ships with 4.38+), so
-    // the .optional lookup is the device gate — no firmware-version check needed. Pre-4.38 / mono
+    // the .optional lookup is the device gate, with no firmware-version check needed. Pre-4.38 / mono
     // devices simply reuse GLR16, which is what they want anyway.
     //libnickel 4.6.9960 * _ZN6Device16getCurrentDeviceEv
     { .name = "_ZN6Device16getCurrentDeviceEv", .out = nh_symoutptr(real_getCurrentDevice),
