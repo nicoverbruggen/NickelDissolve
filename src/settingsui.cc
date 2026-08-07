@@ -286,10 +286,10 @@ void _nds_settings_ctor(void *self, void *parent) {
     // device, not what model it is:
     //   2 = officially supported: the modern hwtcon family (Clara BW/Colour, Libra Colour, Elipsa 2E).
     //   1 = may work: an interface the mod drives best-effort. The current i.MX (Libra 2, Clara 2E and
-    //       the whole Clara HD / Forma / Nia / Libra H2O group), plus AllWinner in the developer build,
-    //       where the sweep runs but has been seen on one device only.
+    //       the whole Clara HD / Forma / Nia / Libra H2O group) and AllWinner (Elipsa, Sage), where
+    //       the sweep works but has been seen on one device.
     //   0 = not supported: an interface the mod recognises but does not drive (the legacy i.MX
-    //       structs, and AllWinner in a release build), or one it has not identified yet.
+    //       structs), or one it has not identified yet.
     // Tiers 2 and 1 get the native "On" toggle; tier 0 gets an "Unsupported" label in its place. A
     // caption is added below for tiers 1 and 0; tier 2 shows no caption, a clean row like before.
     const int support = nds_device_support();

@@ -10,17 +10,17 @@ Many more Kobos can run the animation. Nothing about the animation itself change
 
 - **The Kobo Elipsa and Sage are supported again.** Support for these was removed in v0.4 because the animation did not work reliably on them. They drive their screen through a completely different interface from every other Kobo, and the mod now handles that interface properly rather than approximating it: the bands use the screen's flashless refresh mode, and each one is allowed to finish before the next is sent, which is what previously went wrong. Confirmed on an Elipsa; the Sage uses the same hardware and should behave the same, but hasn't been tested.
 - **The Clara HD, Forma, Nia, Libra H2O and both Edition 2 v2 models are listed as supported.** These already worked, because they use the same screen interface as the Libra 2, but the documentation never said so. Nothing changed on them; they're simply no longer a secret.
-- **Older Kobos now produce a useful log instead of nothing.** The Glo HD, Touch 2.0, Aura ONE, the Edition 2 v1 models, the Aura and the Aura H2O use an older version of the screen interface. The mod now recognises it and records what the device does, which is what a report from one of those needs in order to add support later. It still doesn't animate them.
-- **The Touch, Glo, Mini and Aura HD are confirmed as never animating.** Their screens have no flashless refresh mode, which the animation depends on, so they're out of scope rather than untested.
+- **Older Kobos can now produce a useful log.** The Glo HD, Touch 2.0, Aura ONE, the Edition 2 v1 models, the Aura and the Aura H2O use an older version of the screen interface. The mod now recognises it and can record what the device does, which is what a report from one of those needs in order to add support later. Turn it on with `nds_log:1`. It still doesn't animate them.
+- **The Touch, Glo, Mini and Aura HD are expected never to animate.** Their screens lack the particular flashless refresh mode the animation depends on, so they look to be out of scope rather than merely untested. They still log, which is how that expectation gets checked.
 
 ### Changed
 
-- **The number of bands now follows the physical size of the screen rather than its pixel count.** Two screens with the same number of pixels can be very different sizes, and the old rule couldn't tell them apart. The number of bands is still capped at 12, as it always was, so no device gets a slower page turn than it could have had before. Almost every device keeps exactly the number of bands it had; the one exception is the **Aura H2O Edition 2 v2**, which goes from 10 to 12 because its screen is physically wider than its pixel count suggests.
+- **The number of bands now follows the physical size of the screen rather than its pixel count.** Two screens with the same number of pixels can be very different sizes, and the old rule couldn't tell them apart. The number of bands is still capped at 12, which is where the old rule topped out, so no device gets more bands than was previously possible. Almost every device keeps exactly the number of bands it had; the one exception is the **Aura H2O Edition 2 v2**, which goes from 10 to 12 because its screen is physically wider than its pixel count suggests.
 - The Reading settings entry now reflects what the mod actually drives on your device rather than which model it is, so a newly supported device no longer reports itself as unsupported.
 
 ### Fixed
 
-- On a device the mod doesn't drive, the log recorded nothing at all, which was indistinguishable from the mod not running. It now records what it saw.
+- With logging turned on, a device the mod doesn't drive used to record nothing beyond the startup block, which was indistinguishable from the mod not seeing anything. It now records what it saw.
 
 ## v0.7
 

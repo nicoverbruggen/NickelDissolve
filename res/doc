@@ -12,15 +12,15 @@ not the perfectly smooth hardware swipe, but with greyscale strips it reads well
 
 ## Device support
 
-Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour, Libra Colour and
-Elipsa 2E.
+Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour and Libra Colour.
+The Elipsa 2E uses the same hardware and should work just as well, but nobody has tested it yet.
 
 Many other Kobos can run it best-effort, though how well depends on your device: the Elipsa and
 Sage, and the Libra 2, Clara 2E, Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 models. If
 the animation looks wrong on yours, turn it off in the Reading settings.
 
-Older devices are not supported and the mod simply stays inactive on them. On some of those it
-still records what your device does, which is what helps add support later.
+Older devices are not supported and the mod simply stays inactive on them. On some of those it can
+record what your device does, which is what helps add support later, if you set nds_log:1 below.
 
 The "Page turn animations" entry in the Reading settings tells you which of these applies to your
 device.

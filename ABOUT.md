@@ -18,7 +18,7 @@ Three hooks, all resolved by symbol name (so no per-firmware offsets):
 
 - **`ReadingView::goToNextPage` / `goToPrevPage`** (in `libnickel`): the single sink every sequential page turn funnels into — a tap (`tapGesture` → `nextPage`), a swipe, and a physical button (`nextPageWithTimer`) all reach it through the PLT. They **arm the sweep** and record the **true direction** (which of the two fired; a backward turn sweeps the opposite way). Because it's the common sink, direction is Nickel's own decision rather than inferred, and non-turn renders (menus, book-open) never reach it, so they never arm.
 - **`ioctl`** (in `libkobo`): when a turn is armed, the next full-screen e-ink update is the page render; in `sweep` mode it's replaced with **N swept partial-strip updates** (except colour pages on Kaleido panels, which are detected from the update's waveform and left to full-refresh normally). The band count and band waveform are tuned per device (see *Per-device defaults*): a mono panel's strips reuse the turn's own greyscale waveform (GLR16/REAGL, or the dark reading waveform in Dark Mode), while a Kaleido colour panel's strips use `glkw16`, a sharper Kaleido B&W mode, or its dark counterpart in Dark Mode. The **last strip reuses Nickel's update marker**, so its following `WAIT_FOR_UPDATE_COMPLETE` resolves and there's no hang; a fallback resubmits the original if that strip fails.
-- **One driver per interface.** Each e-ink interface has its own source file: `driver_hwtcon.cc` (MediaTek), `driver_mxcfb.cc` (NXP i.MX, all three generations of its update struct) and `driver_sunxi.cc` (AllWinner). A driver is selected by the `ioctl` number, which encodes the size of its own argument, so a match also confirms the layout. `driver_common.h` holds only the descriptor the core needs to talk about any of them; the drivers share no logic, so they can diverge as more hardware is understood. They already have: the waveform ids collide between families (id 8 is `GCK16` on MediaTek but `DU4` on i.MX), which is exactly the kind of mistake separate files make hard to write. The AllWinner interface of the Elipsa and Sage does not share the flat update struct at all: its geometry sits behind a pointer and its flush mode is a separate word, which is why it is a driver rather than another row. Screen dimensions are read from the update itself (resolution-independent).
+- **One driver per interface.** Each e-ink interface has its own source file: `driver_hwtcon.cc` (MediaTek), `driver_mxcfb.cc` (NXP i.MX, all three generations of its update struct) and `driver_sunxi.cc` (AllWinner). A driver is selected by the `ioctl` number, which encodes the size of its own argument, so a match also confirms the layout. `driver_common.h` holds only what all of them share and no logic: the descriptor the core needs, the update-struct offsets, and the environment struct a sweep is handed; the drivers share no logic, so they can diverge as more hardware is understood. They already have: the waveform ids collide between families (id 8 is `GCK16` on MediaTek but `DU4` on i.MX), which is exactly the kind of mistake separate files make hard to write. The AllWinner interface of the Elipsa and Sage does not share the flat update struct at all: its geometry sits behind a pointer and its flush mode is a separate word, which is why it is a driver rather than another row. Screen dimensions are read from the update itself (resolution-independent).
 - **Device identification, no model list.** The two per-device dials are derived, not looked up. **Band count** follows the panel's *physical* width, from its pixel size and the density Qt reports, so devices of the same physical size tune identically whatever their resolution, with nothing to maintain. The **colour-vs-mono** choice for the band waveform comes from `Device::getCurrentDevice()->hasColorDisplay()` in `libnickel`, resolved by symbol; if that symbol is ever missing the mod assumes mono. No firmware version, model id, or serial number is read from disk.
 
 ## How e-ink refreshes work
@@ -45,7 +45,7 @@ Background for the above: a NickelDissolve strip, and every Kobo screen update, 
 defaults; the wipe is on out of the box. To override, create a
 plain-text `.adds/nickel-dissolve/config` with one `key:value` per line, containing only the keys
 you want to change; delete it to return to the defaults. Changes take effect on reboot (config
-is read once at startup). Legacy pre-rework key names are ignored with a rename hint in the log.
+is read once at startup). An unrecognised key is accepted and silently ignored.
 
 User settings (also documented on-device in `.adds/nickel-dissolve/doc`):
 
@@ -58,6 +58,8 @@ User settings (also documented on-device in `.adds/nickel-dissolve/doc`):
 | `nds_animate_on_swipe` | 1 | `0` = swipe turns don't animate |
 | `nds_animate_on_tap` | 1 | `0` = tap turns don't animate (the classic swipe-animates/tap-instant split; see *Per-gesture control* below) |
 | `nds_animate_on_button` | 1 | `0` = physical page-turn button presses don't animate |
+| `nds_cold_skip_ms` | 0 (off) | when the panel has been idle this long (ms) it has powered down, and the first turn after would stutter while it wakes. Non-zero passes that one turn through as a normal refresh instead of animating it. Superseded by `nds_prewarm_ms` |
+| `nds_prewarm_ms` | 0 (off) | the better cold-wake handler: when the panel has been idle this long (ms), spend the wake on a 2-pixel sliver at the sweep's leading edge, so the stall is a hairline rather than a whole band, and the real bands then run warm |
 
 Debug settings (`nds_debug_*`), for troubleshooting and experiments, not everyday use; the
 defaults are correct per device:
@@ -80,7 +82,7 @@ Unset knobs fall back to a default derived from the hardware, so the wipe looks 
 
 **Band count — by physical panel width.** The wider the screen *in inches*, the more bands, so a band covers about the same physical distance on every device and the wipe reads at a comparable pace. The target is **0.354 inches per band**, which is what the two tuned devices already do: a Clara is 1072 px at 300 dpi (3.57 in) with 10 bands, a Libra Colour is 1264 px at 300 dpi (4.21 in) with 12.
 
-Pixel width is not a usable substitute. Both tuned devices are 300 dpi, so pixels and inches agree there and the difference is invisible; it stops being invisible at any other density. Counting pixels would give the 8-inch Sage more bands than the 10.3-inch Elipsa, because the Sage has more of them on a smaller screen. Density comes from Qt's `QScreen`, computed from the diagonal so rotation does not matter and bounded to 100–400 dpi; if it is unavailable the mod falls back to a flat 105 px per band.
+Pixel width is not a usable substitute. Both tuned devices are 300 dpi, so pixels and inches agree there and the difference is invisible; it stops being invisible at any other density. Counting pixels would give the 8-inch Sage more bands than the 10.3-inch Elipsa, because the Sage has more of them on a smaller screen. Density comes from Qt's `QScreen`, computed from the diagonal so rotation does not matter and bounded to 100–400 dpi; if it is unavailable the mod falls back to a fixed pixel width per band, scaled by the same ratio as the target (105 px on the flat interfaces, 203 px on AllWinner).
 
 | Device | Panel | Density | Physical width | `nds_strips` (unset) |
 |---|---|---|---|---|
@@ -232,7 +234,7 @@ Decoding the `movw`/`movt` pairs that build the ioctl numbers in `libkobo.so` sh
 | `*_WAIT_FOR_UPDATE_COMPLETE` | `0xC008462F` | 8 bytes | yes |
 | `*_WAIT_FOR_UPDATE_COMPLETE` (older) | `0x4004462F` | 4 bytes | no |
 
-The forms differ only in trailing fields, and the offsets the mod reads (`waveform_mode` at 16, `update_mode` at 20, `update_marker` at 24, `flags` at 32) are the same in all of them. So the only thing keeping the mod inert on an older i.MX device is that it does not match the ioctl number.
+The forms differ only in trailing fields, and the offsets the mod reads (`waveform_mode` at 16, `update_mode` at 20, `update_marker` at 24) are the same in all of them, and `flags` is at 32 on every `mxcfb` generation (it is 28 on `hwtcon`, which is a different struct). The older ioctls are matched, decoded and logged; what keeps a release build from animating them is the `sweep_proven` flag on those rows, not a failed match.
 
 `libkobo` pairs those constants into two distinct NXP code paths, which the constants' positions in the binary make plain: the 68-byte send sits beside the 4-byte wait, and the 72-byte send sits directly beside the 8-byte wait. Unpacking every kernel (the i.MX6 ones are LZO-compressed inside the `zImage`) shows which platform answers to which:
 
@@ -263,7 +265,7 @@ These are the values the existing devices were tuned from, and they were all obt
 
 ## Device support
 
-**Officially supported: the modern MediaTek (`hwtcon`) devices.** These are the Kobo Clara BW, Clara Colour, and Libra Colour, and they are what the animation is built and tested for. The current i.MX (`mxcfb`) interface is still driven best-effort, which covers more devices than it once did: the Libra 2 and Clara 2E, and also the whole `kobo7` group (Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 boards), which issue the identical ioctl. The Reading-settings entry reflects this in three tiers: a supported (`hwtcon`) device shows a plain on/off row; a current i.MX (`mxcfb`) device keeps the on/off row but adds a caution that it may not work; anything else shows an *Unsupported* label in place of the toggle.
+**Officially supported: the modern MediaTek (`hwtcon`) devices.** These are the Kobo Clara BW, Clara Colour and Libra Colour, and they are what the animation is built and tested for. The Elipsa 2E is the same interface and should behave identically, but nobody has run it, so it is listed as best-effort rather than supported. The current i.MX (`mxcfb`) interface is still driven best-effort, which covers more devices than it once did: the Libra 2 and Clara 2E, and also the whole `kobo7` group (Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 boards), which issue the identical ioctl. The Reading-settings entry reflects this in three tiers: a supported (`hwtcon`) device shows a plain on/off row; a best-effort device (current `mxcfb`, or `sunxi`) keeps the on/off row but adds a caution that it may not work; anything else shows an *Unsupported* label in place of the toggle.
 
 The **Release** column is what a published build does. **Developer** is the `NDS_PRERELEASE=1` build, which animates every interface the mod can decode so untested hardware can be evaluated; it is not published. *Tested by author* = personally run on the hardware.
 
@@ -272,7 +274,7 @@ The **Release** column is what a published build does. **Developer** is the `NDS
 | **Clara BW** | MediaTek MT8113T | hwtcon (mono) | ✅ Supported | ✅ Animates | ✅ Yes |
 | **Clara Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Supported | ✅ Animates | ✅ Yes |
 | **Libra Colour** | MediaTek MT8113T | hwtcon (Kaleido) | ✅ Supported | ✅ Animates | ✅ Yes |
-| **Elipsa 2E** | MediaTek MT8113T | hwtcon (mono) | ✅ Supported (same family) | ✅ Animates | ❌ No |
+| **Elipsa 2E** | MediaTek MT8113T | hwtcon (mono) | ⚠️ Best effort (untested) | ✅ Animates | ❌ No |
 | **Libra 2** | NXP i.MX6SLL | mxcfb (72) | ⚠️ Best effort | ✅ Animates | ❌ No |
 | **Clara 2E** | NXP i.MX6SLL | mxcfb (72) | ⚠️ Best effort | ✅ Animates | ❌ No |
 | **Clara HD** | NXP i.MX6SLL | mxcfb (72) | ⚠️ Best effort | ✅ Animates | ❌ No |
@@ -288,9 +290,9 @@ The **Release** column is what a published build does. **Developer** is the `NDS
 | **Elipsa** | AllWinner B300 | sunxi (`DISP_EINK_UPDATE2`) | ⚠️ Best effort | ✅ Animates | ✅ Yes |
 | **Sage** | AllWinner B300 | sunxi (`DISP_EINK_UPDATE2`) | ⚠️ Best effort | ✅ Animates | ❌ No |
 
-Every row logs, including the ones that never animate. A device that produces no animation still produces a report, which is what makes the untested rows resolvable.
+Every row can log, including the ones that never animate, which is what makes the untested rows resolvable. In a release build that needs `nds_log:1` or `nds_mode:observe`; the developer build traces from the first boot.
 
-The "officially supported" test is the driver family, not the model: the mod treats the modern `hwtcon` interface as supported, the current `mxcfb` interface as unofficial best-effort, and the legacy `mxcfb` and `sunxi` interfaces as unsupported in a released build. A released build only ever sweeps `hwtcon` or the 72-byte `mxcfb`; on anything else it stays inert (no animation, no risk).
+The "officially supported" test is the driver family, not the model: the mod treats the modern `hwtcon` interface as supported, and the current `mxcfb` and `sunxi` interfaces as unofficial best-effort. A released build sweeps those three; the legacy `mxcfb` structs are decoded and logged but never animated, and an unrecognised interface is left alone entirely (no animation, no risk).
 
 **The legacy i.MX interfaces are recognised but not driven.** The `mxcfb68` and `mxcfb64` rows in the platform table cover the i.MX6SL and i.MX50 devices. They exist so the mod can decode and log that hardware, which is what turns a silent unknown device into a usable report. In a released build it never animates there and the settings row reports the device as unsupported, and there is **no configuration key to override that**: an interface nobody has verified a page turn on is simply not supported, and no amount of config should be able to argue otherwise. The developer build (`NDS_PRERELEASE=1`) is the only thing that animates them, because establishing whether the wipe is viable is what that build is for.
 

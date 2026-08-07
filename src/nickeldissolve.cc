@@ -156,8 +156,8 @@ extern "C" int nds_animations_enabled(void) { return !nds_off(); }
 //   2 = supported: the modern MTK/hwtcon family (Clara BW/Colour, Libra Colour); a plain toggle.
 //   1 = may work: i.MX (mxcfb, Libra 2 / Clara 2E). The animation is best-effort and can look broken on
 //                 some board revisions, so the toggle carries a "may not work, turn it off" note.
-//   0 = not supported: sunxi (Elipsa/Sage), a legacy i.MX interface the mod only decodes for logging,
-//                 or an unrecognised / not-yet-detected platform.
+//   0 = not supported: a legacy i.MX interface the mod only decodes for logging, or an unrecognised
+//                 or not-yet-detected platform. AllWinner reports tier 1, not 0.
 // Keyed on the platform's own capability rather than its name, so adding a row to NDS_PLATFORMS gets
 // the right tier without touching this.
 extern "C" int nds_device_support(void) {
@@ -188,9 +188,8 @@ static bool nds_verbose_compute() {
 // ---- per-device animation tuning ---------------------------------------------------------
 // Two independent axes, chosen so same-size / same-panel devices tune identically with no model list
 // to maintain. Config keys (nds_strips, nds_debug_strip_waveform) still win over both.
-//   * Band count follows the panel's longest edge (learned from the full-screen updates below): the
-//     7" panels (Libra Colour / Libra 2, 1264x1680) get 12 bands; the 6" panels (Clara BW / Colour /
-//     2E / HD, 1072x1448) and anything unknown get 10.
+//   * Band count follows the panel's PHYSICAL width, so a band covers about the same distance on
+//     every screen whatever its resolution (see nds_strips_for_width), capped at NDS_MAX_AUTO_STRIPS.
 //   * The band waveform is glkw16 (a Kaleido B&W-optimised mode, crisper bands) on colour panels,
 //     decided by Device::getCurrentDevice()->hasColorDisplay(); mono panels keep their reading wf.
 static uint32_t nds_panel_max_dim = 0;   // longest panel edge seen so far (px); 0 until the first update
@@ -414,7 +413,13 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             nds_turn_pending = 0;                      // stale: never sweep an unrelated later render
         int32_t sw = 0, sh = 0;
         if (nds_turn_pending && nds_sunxi_page_rect(argp, &sw, &sh)) {
-            nds_turn_pending = 0;                      // consume the trigger, one sweep per turn
+            const bool want_anim = nds_gesture_animate();   // per-gesture toggles apply here too
+            nds_turn_pending = 0;                      // consume the trigger either way, one per turn
+            if (!want_anim) {
+                if (nds_verbose_enabled)
+                    NDS_LOG("no-anim [sunxi] %dx%d -> this gesture's toggle is off, passthrough", sw, sh);
+                return real_ioctl(fd, request, argp);
+            }
             bool rtl = nds_rtl();
             if (nds_turn_dir == 1) rtl = !rtl;         // a backward turn sweeps the other way
             struct nds_sunxi_env env;
@@ -508,7 +513,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                                 (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                     }
                     {
-                        // Resolve everything the driver needs here, so driver_flat.cc keeps no state
+                        // Resolve everything the driver needs here, so driver_hwtcon.cc / driver_mxcfb.cc keeps no state
                         // of its own and the config/tuning rules stay in one place.
                         const uint32_t turn_wf = nds_rd32(u, OFF_WAVEFORM);
                         uint32_t swf = nds_strip_wf();                     // config override wins
