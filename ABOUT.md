@@ -147,14 +147,6 @@ So `nds_wf_sweepable` sweeps the greyscale reading turns: `GL16`/`GLR16` in day 
 
 **Trying an untested device:** create a config with `nds_mode:observe` before the first reboot; it changes nothing and logs the ioctl stream. Confirm the log shows a platform (`[hwtcon]`/`[mxcfb]`) and `turn:` lines, then remove the line (or set `sweep`). If the log shows neither, the device isn't on a supported interface (the mod stays inert there anyway).
 
-## Roadmap / TODO
-
-This is a work in progress. Known gaps and things I still want to do, roughly in priority order:
-
-- **✅ Waveform-based colour skip, confirmed on hardware (Libra Colour, fw 4.45.23697).** A colour kepub logged `SWEEP … wf=4(GLR16)` on every B&W text turn and `SKIP … wf=10(GCC16) … not a B&W reading turn` on every colour/image turn, with `flags=0x600` present on *both* (confirming the CFA field is device-level, not content). The `GL16`/`GLR16`-only allowlist separates them cleanly; menu (`AUTO`/`DU`) and exit-to-home (`GC16`) renders were also correctly passed through. Clara Colour shares the exact MT8113T hwtcon-Kaleido `KoboScreenMTK` path, so the same holds; Clara BW is mono (GLR16 turns, no colour). Remaining: physically confirm on the two Clara models.
-- **✅ Per-gesture control and true direction, confirmed on hardware.** Swipe, tap, and button turns all animate, and the sweep direction comes from the `goToNextPage`/`goToPrevPage` sink rather than the tapped screen half — so it's correct even with remapped/one-handed tap zones. Confirmed on the Clara BW (taps) and the Libra Colour (page-turn buttons).
-- **Non-supported devices.** The i.MX (Libra 2, Clara 2E) code path remains so those devices can still install and run it best-effort, but they are not officially supported and may not work; the settings entry warns and lets you turn it off. The AllWinner sunxi devices (Elipsa, Sage) are no longer handled at all: the mod stays inactive on them and marks them Unsupported. Elipsa 2E shares the modern `hwtcon` interface with the supported devices and is treated as supported, but hasn't been run on hardware.
-
 ## Build
 
 ```sh

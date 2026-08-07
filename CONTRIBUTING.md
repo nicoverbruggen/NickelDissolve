@@ -49,10 +49,10 @@ All hooks are `.optional = true` and null-checked at the use site: a missing sym
 
 ## Pull requests
 
-- Add a `## Unreleased` entry to `CHANGELOG.md` for any user-visible change (release notes are generated from it).
+- Add an entry to `CHANGELOG.md` under the heading for the version it will ship in, for any user-visible change (release notes are generated from it).
 - Annotate any new `libnickel` symbol with `//libnickel …`; CI verifies it.
 - State the device + firmware you tested on, and attach the relevant `nickel-dissolve.log` excerpt (the PR template asks for both).
 
 ## Releases (maintainers)
 
-Rename `## Unreleased` in `CHANGELOG.md` to the new `## vX.Y`, tag the commit `vX.Y`, and push the tag. CI builds, extracts that section as the release notes, attaches `KoboRoot.tgz`, and fails if the CHANGELOG section is missing.
+Check that `CHANGELOG.md` has a complete `## vX.Y` section matching the tag name, tag the commit `vX.Y`, and push the tag. CI builds, extracts that section as the release notes, attaches `KoboRoot.tgz`, and fails if the CHANGELOG section is missing.
