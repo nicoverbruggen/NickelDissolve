@@ -1,6 +1,6 @@
 # Contributing to NickelDissolve
 
-Technical guide for building, testing, and changing the mod. For how the wipe actually works (the platform table, waveform/CFA handling, per-device defaults, and every `nds_debug_*` key), read [ABOUT.md](ABOUT.md), the technical companion to the (deliberately non-technical) README. 
+Technical guide for building, testing, and changing the mod. For how the wipe actually works (the per-interface drivers, waveform/CFA handling, per-device defaults, and every `nds_debug_*` key), read [ABOUT.md](ABOUT.md), the technical companion to the (deliberately non-technical) README. 
 
 These mods follow the shared conventions in [NickelGuidance](https://github.com/nicoverbruggen/NickelGuidance), which may not be available at the time of publishing.
 

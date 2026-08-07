@@ -1,7 +1,7 @@
 include NickelHook/NickelHook.mk
 
 override LIBRARY  := src/libnickeldissolve.so
-override SOURCES  += src/config.c src/nickeldissolve.cc src/gesture.cc src/settingsui.cc
+override SOURCES  += src/config.c src/nickeldissolve.cc src/driver_hwtcon.cc src/driver_mxcfb.cc src/driver_sunxi.cc src/gesture.cc src/settingsui.cc
 override MOCS     += src/ndsbridge.h
 
 # QtCore/QtGui: the app-wide gesture event filter and reader-state tracking (plain QObject).
@@ -23,5 +23,14 @@ override NDS_CONFIG_DIR := /mnt/onboard/.adds/nickel-dissolve
 endif
 
 override CPPFLAGS += -DNDS_CONFIG_DIR='"$(NDS_CONFIG_DIR)"' -DNDS_CONFIG_DIR_DISP='"$(patsubst /mnt/onboard/%,KOBOeReader/%,$(NDS_CONFIG_DIR))"'
+
+# Diagnostics build, for handing to owners of untested hardware:
+#   ./build.sh clean all strip koboroot NDS_PRERELEASE=1
+# It animates every e-ink interface the mod recognises (not just the ones with page-turn evidence) and
+# traces from the first boot, so a tester only has to read a book and send back the log. Do not publish
+# it: on untested hardware the animation may look wrong. See "Kobo hardware map" in ABOUT.md.
+ifeq ($(NDS_PRERELEASE),1)
+override CPPFLAGS += -DNDS_PRERELEASE=1
+endif
 
 include NickelHook/NickelHook.mk

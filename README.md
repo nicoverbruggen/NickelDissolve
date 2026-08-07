@@ -23,11 +23,15 @@ It's a stepped sweep rather than a perfectly fluid one (that's a limit of how E 
 
 | Device | Works? |
 |---|---|
-| Kobo Libra Colour | ✅ Officially supported, tested (including colour-page handling) |
+| Kobo Libra Colour | ✅ Officially supported, tested |
 | Kobo Clara Colour | ✅ Officially supported (same hardware family as the Libra Colour) |
-| Kobo Clara BW | ✅ Officially supported, tested (black-and-white) |
-| Kobo Libra 2 | ⚠️ Not officially supported; may work if you install it (hardware revision dependent) |
-| Kobo Clara 2E | ⚠️ Not officially supported; may work if you install it (hardware revision dependent) |
+| Kobo Clara BW | ✅ Officially supported, tested |
+| Kobo Elipsa 2E | ✅ Officially supported (same hardware family) |
+| Kobo Elipsa | ⚠️ Works, tested, but not officially supported |
+| Kobo Sage | ⚠️ Should work (same hardware as the Elipsa), untested |
+| Kobo Libra 2, Clara 2E, Clara HD, Forma, Nia, Libra H2O, Aura Edition 2 v2, Aura H2O Edition 2 v2 | ⚠️ Not officially supported; may work if you install it, and how well depends on your device's hardware revision |
+| Kobo Glo HD, Touch 2.0, Aura ONE, Aura, Aura H2O, Aura Edition 2 v1, Aura H2O Edition 2 v1 | ❌ Not supported. The mod stays inactive, but it does record what your device does, which helps add support later |
+| Kobo Touch, Glo, Mini, Aura HD | ❌ Not supported. These screens have no flashless refresh mode, which the animation needs |
 | Anything else | Nothing happens: the mod stays inactive, no animation and no risk |
 
 On colour devices (Kaleido screens), pages with **colour content** are detected automatically and refresh normally instead of animating, so colours are never distorted. Regular black-and-white pages animate as usual.

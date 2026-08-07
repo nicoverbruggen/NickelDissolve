@@ -34,6 +34,12 @@
 #include <cstring>
 #include <strings.h>
 #include <unistd.h>
+#include <fcntl.h>
+#include <cmath>
+
+#include <QGuiApplication>
+#include <QScreen>
+#include <QSize>
 #include <time.h>
 #include <sys/time.h>
 #include <sys/stat.h>
@@ -41,6 +47,10 @@
 #include <NickelHook.h>
 
 #include "config.h"
+#include "driver_common.h"
+#include "driver_hwtcon.h"
+#include "driver_mxcfb.h"
+#include "driver_sunxi.h"
 #include "gesture.h"
 #include "settingsui.h"
 #include "util.h"
@@ -48,67 +58,51 @@
 static const char *const NDS_LIBKOBO   = "/usr/local/Kobo/platforms/libkobo.so";
 static const char *const NDS_LIBNICKEL = "/usr/local/Kobo/libnickel.so.1.0.0";
 
-// ---- update-struct field offsets (common to hwtcon & mxcfb) ----
-enum { OFF_TOP = 0, OFF_LEFT = 4, OFF_WIDTH = 8, OFF_HEIGHT = 12,
-       OFF_WAVEFORM = 16, OFF_UPDMODE = 20, OFF_MARKER = 24 };
-enum { UPD_PARTIAL = 0, UPD_FULL = 1 };
-#define WF_GC16 2u                    // GC16 (full black-flash mode), id 2 on BOTH hwtcon and mxcfb
 #define NDS_IOC_MAGIC(req) (((req) >> 8) & 0xFFU)
 #define NDS_TURN_WINDOW_S  2          // a pending turn is stale after this many seconds
-#define NDS_PREWARM_PX     2          // width of the cold-wake lead-in sliver (a hairline; the driver
-                                      // validates region bounds only, no min width; see hwtcon dump)
 
-// ---- platform table: which ioctls carry an e-ink update, per driver ----
-struct nds_platform {
-    const char   *name;
-    unsigned long send;        // *_SEND_UPDATE (intercept + reissue partial strips)
-    unsigned long wait_sub;    // *_WAIT_FOR_UPDATE_SUBMISSION (0 = none, e.g. mxcfb)
-    unsigned long wait_cmpl;   // *_WAIT_FOR_UPDATE_COMPLETE (for logging / optional per-strip wait)
-    uint32_t      size;        // bytes to copy when reissuing an update
-    uint32_t      flags_off;   // byte offset of the `flags` field in the update struct
-    uint32_t      cfa_skip;    // CFA-skip flag bit (skips the per-region colour pass; 0 = n/a)
-    uint32_t      cfa_field;   // mask of the CFA colour-mode field inside `flags` (0 = no CFA;
-                               // hwtcon: HWTCON_FLAG_CFA_FLDS_MASK 0x7f00, non-zero means the
-                               // update runs the driver's CFA colour pass, i.e. a COLOUR page)
-    bool          flash_full;  // how a full-flash refresh is flagged: true = update_mode==FULL (i.MX,
-                               // where the reading turn is PARTIAL); false = by the GC16 waveform
-                               // (hwtcon, where the reading turn is itself FULL)
-    uint32_t      def_delay_us;// per-platform default inter-strip delay when nds_delay_us is unset:
-                               // hwtcon paces itself via the submission-wait (0); mxcfb has no
-                               // submission-wait, so it needs an explicit delay or the wipe is instant
-    uint32_t      dith_off;    // byte offset of dither_mode in the update struct (0 = don't log it):
-                               // hwtcon_update_data has int dither_mode right after flags (@0x20)
-    uint32_t      def_strip_wf;// waveform to draw the swept bands with when nds_debug_strip_waveform is
-                               // unset. 0 = reuse the update's own waveform (see nds_default_strip_wf,
-                               // which also applies the per-panel day/dark choice on colour Kaleido).
-};
-static const struct nds_platform NDS_PLATFORMS[] = {
-    // MTK (Clara BW/Colour, Libra Colour): HWTCON flags@28, HWTCON_FLAG_CFA_SKIP = 0x8000,
-    // CFA colour-mode field = HWTCON_FLAG_CFA_FLDS_MASK 0x7f00 (G1=0x100, AIE_S4=0x200, ...,
-    // NTX=0xa00, NTX_SF=0xb00; 0 means no colour processing for this update).
-    // Reading turn = FULL + GLR16; flash = FULL + GC16 → detect flash by waveform.
-    // Paced by WAIT_FOR_UPDATE_SUBMISSION between strips, so default delay 0.
-    { "hwtcon", 0x4024462EUL, 0x40044637UL, 0xC008462FUL, 36, 28, 0x8000UL, 0x7f00UL, false, 0,     32, 0 },
-    // i.MX (Libra 2 & most pre-2024): mxcfb flags@32, no CFA (mono panels only).
-    // Reading turn = PARTIAL + REAGL(6); flash = FULL + AUTO(257)/GC16 → detect flash by mode==FULL.
-    // No submission-wait to pace strips, so default to ~30 ms/strip. def_strip_wf = 0: the strips REUSE
-    // the turn's own waveform, i.e. whatever high-quality greyscale mode Nickel picked for the page
-    // (REAGL on panels that support it), so each band is a full-quality, flashless render and we use
-    // the panel's best refresh automatically without hardcoding one. Where reusing REAGL per band is
-    // too slow, nds_debug_strip_waveform:1 forces the faster DU wipe.
-    { "mxcfb",  0x4048462EUL, 0UL,          0xC008462FUL, 72, 32, 0UL,      0UL,      true,  30000, 0,  0 },
-};
-static const int NDS_NPLAT = (int)(sizeof(NDS_PLATFORMS) / sizeof(NDS_PLATFORMS[0]));
-
+// Which driver, if any, owns this ioctl. Asked in turn rather than from one table, so each driver
+// keeps its own hardware knowledge and nothing here needs to know what distinguishes them.
 static const struct nds_platform *nds_match(unsigned long request) {
-    for (int i = 0; i < NDS_NPLAT; i++)
-        if (request == NDS_PLATFORMS[i].send) return &NDS_PLATFORMS[i];
-    return nullptr;
+    const struct nds_platform *p = nds_hwtcon_match(request);
+    return p ? p : nds_mxcfb_match(request);
 }
 
-// unaligned-safe field access
-static inline uint32_t rd32(const uint8_t *b, unsigned off) { uint32_t v; memcpy(&v, b + off, 4); return v; }
-static inline void     wr32(uint8_t *b, unsigned off, uint32_t v) { memcpy(b + off, &v, 4); }
+// True when this platform is the MediaTek one. Used for the few core decisions that genuinely differ
+// (which waveform table to name ids from, whether the CFA force-B&W switch applies); cfa_field is
+// non-zero only on hwtcon.
+static bool nds_is_hwtcon(const struct nds_platform *plat) { return plat && plat->cfa_field != 0u; }
+
+// Waveform helpers dispatch to the owning driver: the two number their modes differently, so an id
+// only means something once you know which interface produced it.
+static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
+    return nds_is_hwtcon(plat) ? nds_hwtcon_wf_sweepable(wf) : nds_mxcfb_wf_sweepable(plat, wf);
+}
+static const char *nds_wf_name(uint32_t wf, const struct nds_platform *plat) {
+    return nds_is_hwtcon(plat) ? nds_hwtcon_wf_name(wf) : nds_mxcfb_wf_name(wf);
+}
+static uint32_t nds_dither(const uint8_t *u, const struct nds_platform *plat) {
+    return plat->dith_off ? nds_rd32(u, plat->dith_off) : 0u;
+}
+
+// Whether this platform may actually animate. An interface the mod only knows well enough to decode
+// (sweep_proven == false) is recognised and logged but never swept, so a device we have no page-turn
+// evidence for behaves exactly as it did before the mod was installed. There is deliberately NO config
+// key to turn that on: in a released build such a device is simply not supported, and no reader should
+// be able to talk themselves into an animation nobody has verified.
+//
+// The NDS_PRERELEASE developer build is where that changes: every recognised interface animates, best
+// effort, and tracing is on from the first boot (see nds_verbose_compute). Finding out whether the wipe
+// is viable on that hardware is the entire purpose of that build, so it tries rather than sits inert.
+static bool nds_sweep_allowed(const struct nds_platform *plat) {
+    if (!plat) return false;
+#ifdef NDS_PRERELEASE
+    return true;
+#else
+    return plat->sweep_proven;
+#endif
+}
+
 
 static int  (*real_ioctl)(int fd, unsigned long request, void *argp) = nullptr;
 static void (*real_goToNextPage)(void *self) = nullptr;
@@ -132,16 +126,12 @@ static volatile long nds_flash_ts  = 0;       // time() of that flash (staleness
 #define NDS_SETTLE_WINDOW_S 2
 static uint32_t nds_ephemeral_marker = 0xF0000000u;   // markers for non-final strips (never collide with Nickel)
 static const struct nds_platform *nds_active = nullptr;   // detected from the first update ioctl (for logging)
+// The AllWinner interface has no platform-table row (its update model does not fit one), so it is
+// tracked separately. Set the first time a sunxi update is seen.
+static bool nds_sunxi_active = false;
 
 static long nds_now() { return (long)time(nullptr); }
 
-// Idle tracking: the gap since the last e-ink SEND gates the cold-wake mitigations (the prewarm
-// sliver and the cold-skip). Wall-clock µs; only differences are used, so a clock step (unlikely on
-// a reading device) at worst mis-gates one turn.
-static uint64_t nds_now_us() {
-    struct timeval tv; gettimeofday(&tv, nullptr);
-    return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
-}
 static uint64_t nds_last_send_us = 0;        // last e-ink SEND the hook saw (turn, footer, clock, ...)
 static uint64_t nds_turn_idle_any_us  = 0;   // gap before this update since the previous update of any kind
 
@@ -166,11 +156,17 @@ extern "C" int nds_animations_enabled(void) { return !nds_off(); }
 //   2 = supported: the modern MTK/hwtcon family (Clara BW/Colour, Libra Colour); a plain toggle.
 //   1 = may work: i.MX (mxcfb, Libra 2 / Clara 2E). The animation is best-effort and can look broken on
 //                 some board revisions, so the toggle carries a "may not work, turn it off" note.
-//   0 = not supported: sunxi (Elipsa/Sage) or an unrecognised / not-yet-detected platform.
+//   0 = not supported: sunxi (Elipsa/Sage), a legacy i.MX interface the mod only decodes for logging,
+//                 or an unrecognised / not-yet-detected platform.
+// Keyed on the platform's own capability rather than its name, so adding a row to NDS_PLATFORMS gets
+// the right tier without touching this.
 extern "C" int nds_device_support(void) {
-    if (nds_active && !strcmp(nds_active->name, "hwtcon")) return 2;
-    if (nds_active && !strcmp(nds_active->name, "mxcfb"))  return 1;
-    return 0;
+    // sunxi is driven by driver_sunxi.cc rather than the platform table, so it reports the same
+    // best-effort tier an unofficial i.MX device does. The sweep is confirmed working on an Elipsa,
+    // but on one device and one board revision, which is exactly what tier 1 describes.
+    if (nds_sunxi_active) return 1;
+    if (!nds_sweep_allowed(nds_active)) return 0;
+    return nds_active->cfa_field ? 2 : 1;   // cfa_field is non-zero only on hwtcon
 }
 static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 // Whether verbose per-ioctl / per-turn tracing should be on for this boot. Tied to the MODE so a
@@ -181,9 +177,13 @@ static bool nds_sweep_mode()  { return !nds_off() && !nds_mode_is("observe"); }
 static bool nds_verbose_compute() {
     if (nds_off()) return false;
     if (nds_mode_is("observe")) return true;
+#ifdef NDS_PRERELEASE
+    return true;   // the diagnostics build always traces: collecting the log is its whole purpose
+#else
     // In "sweep" mode, stay quiet unless the user opts in with nds_log:1, or the config had a
     // problem (force-enabled so mistakes self-diagnose).
     return nds_global_config_bool("nds_log", false) || nds_config_problem_seen();
+#endif
 }
 // ---- per-device animation tuning ---------------------------------------------------------
 // Two independent axes, chosen so same-size / same-panel devices tune identically with no model list
@@ -194,8 +194,82 @@ static bool nds_verbose_compute() {
 //   * The band waveform is glkw16 (a Kaleido B&W-optimised mode, crisper bands) on colour panels,
 //     decided by Device::getCurrentDevice()->hasColorDisplay(); mono panels keep their reading wf.
 static uint32_t nds_panel_max_dim = 0;   // longest panel edge seen so far (px); 0 until the first update
+// Band count scales so a band covers a similar PHYSICAL width on every device, which is what makes the
+// wipe read at the same pace regardless of screen size. The two tuned devices set the constant: a
+// 6-inch Clara (1072px wide at 300dpi = 3.57in) gets 10 bands and a 7-inch Libra Colour (1264px at
+// 300dpi = 4.21in) gets 12, which is ~0.354in of panel per band in both cases.
+//
+// Pixels are NOT a usable proxy for this. Both tuned devices are 300dpi, so pixel width and physical
+// width agree there and the difference is invisible; it stops being invisible on a panel with another
+// density. The Elipsa is 10.3in at ~227dpi, so its 1404px are 6.19in wide, physically wider than the
+// Sage's 1440px, which are only 4.8in at 300dpi. Counting pixels would give the Sage MORE bands than
+// the larger Elipsa and make its wipe crawl over a smaller screen.
+#define NDS_BAND_MILS 354                // target physical band width, thousandths of an inch
+#define NDS_BAND_PX   105                // pixel fallback, only used when the density is unknown
+// Ceiling on the DERIVED band count. Not a size limit but a time one: a band does not cost the same on
+// every interface (about 10ms on MediaTek, which pipelines them, against about 28ms on i.MX, which
+// paces them with a delay), so past a point more bands only makes a turn slower without looking
+// better. 12 is what the old panel-size rule topped out at, so this is a ceiling that was already
+// there implicitly. An explicit nds_strips still reaches 32: this bounds the automatic answer only.
+#define NDS_MAX_AUTO_STRIPS 12
+
+// Panel density, from Qt, or 0 while it cannot be determined. Taken from the diagonal so it does not
+// depend on the current rotation, and sanity-bounded because a wrong answer here would badly mis-tune
+// the animation. Cached once it succeeds; the panel cannot change at runtime.
+static int nds_panel_dpi() {
+    static int cached = 0;
+    if (cached) return cached;
+    if (!QGuiApplication::instance()) return 0;        // too early to ask; try again on a later turn
+    QScreen *s = QGuiApplication::primaryScreen();
+    if (!s) return 0;
+    const QSize  px = s->size();
+    const QSizeF mm = s->physicalSize();
+    if (px.width() < 512 || mm.width() < 1.0 || mm.height() < 1.0) return 0;
+    const double pxdiag = sqrt((double)px.width() * px.width() + (double)px.height() * px.height());
+    const double indiag = sqrt(mm.width() * mm.width() + mm.height() * mm.height()) / 25.4;
+    if (indiag < 3.0) return 0;
+    const int dpi = (int)(pxdiag / indiag + 0.5);
+    if (dpi < 100 || dpi > 400) return 0;              // implausible: fall back to the pixel rule
+    cached = dpi;
+    return dpi;
+}
+
+// band_mils is the target physical band width. It is a parameter rather than a constant because a
+// band does not cost the same everywhere: on the AllWinner controller each one is a full
+// completion-waited refresh, so that driver asks for wider bands to keep a turn's total time sane.
+static int nds_strips_for_width(uint32_t width, int band_mils) {
+    if (width < 512) return 10;                        // no usable panel size yet: the old default
+    if (band_mils < 50) band_mils = NDS_BAND_MILS;
+    const int dpi = nds_panel_dpi();
+    int n;
+    if (dpi > 0) {
+        const uint32_t mils = (uint32_t)(((uint64_t)width * 1000u) / (uint32_t)dpi);
+        n = (int)((mils + (uint32_t)band_mils / 2) / (uint32_t)band_mils);
+    } else {
+        // No density: fall back to pixels, scaled by the same ratio so the two agree in spirit.
+        const uint32_t px = (uint32_t)((long)NDS_BAND_PX * band_mils / NDS_BAND_MILS);
+        n = (int)((width + px / 2) / (px ? px : NDS_BAND_PX));
+    }
+    if (n < 2) n = 2;
+    if (n > NDS_MAX_AUTO_STRIPS) n = NDS_MAX_AUTO_STRIPS;
+    return n;
+}
+
+// ---- sweep timing ------------------------------------------------------------------------
+// Measured only, never fed back into the band count. Deriving the band count from a target duration
+// was tried and pulled: it would have retuned the tested devices toward a target that was picked
+// rather than measured, changing hardware that already behaves well. The measurement stays because it
+// is what a real target would have to be calibrated FROM, starting with a device known to feel right.
+static void nds_note_band_time(int bands, uint64_t took_us) {
+    if (!nds_verbose_enabled || bands < 1 || took_us == 0) return;
+    NDS_LOG("sweep timing: %d bands in %lums (%luus/band)", bands,
+            (unsigned long)(took_us / 1000), (unsigned long)(took_us / (uint64_t)bands));
+}
+
 static int nds_default_strips() {
-    return nds_panel_max_dim >= 1600 ? 12 : 10;   // 7" (…x1680) -> 12; 6" (…x1448) and unknown -> 10
+    // The flat interfaces only give us the longest edge. Kobo panels are close to 4:3, so width is
+    // about three quarters of it; that approximation reproduces 10 and 12 for the two tuned devices.
+    return nds_strips_for_width(nds_panel_max_dim * 3u / 4u, NDS_BAND_MILS);
 }
 // Device colour-panel query, via libnickel symbols resolved in NickelDissolveDlsym. Cached (the panel
 // can't change at runtime). Defaults to mono (no glkw16) if the symbols are missing on an unfamiliar
@@ -260,147 +334,6 @@ static bool nds_force_bw()    { return nds_global_config_bool("nds_debug_force_b
 // (PLATFORM-SPECIFIC: e.g. GLR16 is 4 on hwtcon but 6 on mxcfb; use with care).
 static uint32_t nds_strip_wf() { const char *v = nds_global_config_get("nds_debug_strip_waveform"); if (!v || !*v) return 0; int w = atoi(v); return w > 0 ? (uint32_t)w : 0; }
 
-// hwtcon waveform ids (from KoboScreenMTK::idToWaveform in libkobo). The greyscale reading
-// waveforms are GL16/GLR16; the colour ones (GCC16/GLRC16/GCK16/GLKW16) and the GC16 flash /
-// A2·DU menu modes are everything else.
-#define WF_DU 1u
-#define WF_GL16 3u
-#define WF_GLR16 4u
-#define WF_GCK16 8u                  // dark-mode flash (the GC16 counterpart when the reader is in dark mode)
-#define WF_GLKW16 9u                 // dark-mode reading turn (the GLR16 counterpart in dark mode)
-#define WF_GCC16 10u
-#define WF_GLRC16 11u
-// Whether an update carrying this waveform should be swept. THE colour guard, validated against
-// libkobo's KoboScreenMTK::handleAutoWfm: it calls fbIsGray(rect) and picks a COLOUR waveform
-// (GCC16=10 / GLRC16=11 / GCK16=8 / GLKW16=9) for non-grey content, a greyscale one (GLR16=4,
-// GL16=3) for text. So a colour page never reaches us as GL16/GLR16; gating on the waveform skips
-// colour pages, GC16 flashes, AUTO(257), and A2/DU menu updates in a single test, and (unlike the
-// always-set CFA flag field) it is genuinely content-driven. On a mono panel (mxcfb, no CFA) the
-// reading waveform varies by board revision: logs show one Libra 2 turning with REAGL(6) and an older
-// board with GLKW16(10), both using AUTO(257)/DU for menus and GC16 / full-screen AUTO for flashes. So
-// we allow the flashless greyscale reading set (GL16=5, REAGL=6, REAGLD=7, GLKW16=10, i.MX ids) and
-// reject everything else, so menus and the toolbar never sweep. The animation is best-effort on i.MX: a
-// REAGL board looks great, a GLKW16 board is slow, which is why the settings warn it may not work.
-// nds_debug_sweep_any_waveform bypasses the allowlist (sweep anything non-GC16) for experiments.
-static bool nds_wf_sweepable(const struct nds_platform *plat, uint32_t wf) {
-    if (nds_global_config_bool("nds_debug_sweep_any_waveform", false)) return wf != WF_GC16;
-    if (plat->cfa_field == 0)                              // mono (i.MX): flashless greyscale reading modes
-        return wf == 5u || wf == 6u || wf == 7u || wf == 10u;  // GL16 / REAGL / REAGLD / GLKW16 (i.MX ids)
-    // Kaleido-capable (MTK/hwtcon): greyscale reading turns only. Day mode turns are GL16/GLR16; the
-    // reader's dark mode emits the same turn as GLKW16 (the "REAGL DARK" waveform), so it sweeps too.
-    // GCK16 (dark flash), GCC16/GLRC16 (colour) stay rejected. cfa_field is non-zero for all hwtcon,
-    // so this branch covers both mono and colour MTK panels.
-    return wf == WF_GL16 || wf == WF_GLR16 || wf == WF_GLKW16;
-}
-// i.MX (mxcfb) and MTK (hwtcon) number their waveform modes differently, so the name is
-// platform-dependent. i.MX numbering is from koreader's mxcfb-kobo.h; the WF_* constants below are
-// the MTK numbering. i.MX mono panels carry cfa_field == 0, which selects the right table.
-static const char *nds_wf_name(uint32_t wf, const struct nds_platform *plat) {
-    if (plat && plat->cfa_field == 0u) {   // i.MX / mxcfb
-        switch (wf) {
-            case 0:  return "INIT";  case 1: return "DU";    case 2:  return "GC16";   case 3:   return "GC4";
-            case 4:  return "A2";    case 5: return "GL16";  case 6:  return "REAGL";  case 7:   return "REAGLD";
-            case 8:  return "DU4";   case 9: return "GCK16"; case 10: return "GLKW16"; case 257: return "AUTO";
-            default: return "?";
-        }
-    }
-    switch (wf) {   // MTK / hwtcon
-        case 0: return "INIT"; case WF_DU: return "DU"; case WF_GC16: return "GC16";
-        case WF_GL16: return "GL16"; case WF_GLR16: return "GLR16"; case 6: return "REAGL";
-        case 8: return "GCK16"; case 9: return "GLKW16"; case WF_GCC16: return "GCC16";
-        case WF_GLRC16: return "GLRC16"; case 257: return "AUTO"; default: return "?";
-    }
-}
-static uint32_t nds_dither(const uint8_t *u, const struct nds_platform *plat) {
-    return plat->dith_off ? rd32(u, plat->dith_off) : 0u;
-}
-
-// ---- the sweep: replace one full-screen update with N swept partial strips ----------------
-static void nds_do_sweep(int fd, const struct nds_platform *plat, const uint8_t *orig) {
-    const uint32_t M  = rd32(orig, OFF_MARKER);
-    const uint32_t x0 = rd32(orig, OFF_LEFT), y0 = rd32(orig, OFF_TOP);
-    const uint32_t W  = rd32(orig, OFF_WIDTH), H = rd32(orig, OFF_HEIGHT);
-    const int N = nds_strips();
-    const uint32_t sw = W / (uint32_t)N;
-    const uint32_t turn_wf = rd32(orig, OFF_WAVEFORM);
-    uint32_t wf_override = nds_strip_wf();                     // config override wins
-    if (wf_override == 0) wf_override = nds_default_strip_wf(plat, turn_wf);   // else per-device default (colour day: 8, dark: GLKW16)
-    const int delay = nds_delay_us((int)plat->def_delay_us);   // config wins; else per-platform default
-    const bool want_complete = nds_wait_complete();
-    bool rtl = nds_rtl();
-    if (nds_turn_dir == 1) rtl = !rtl;               // backward turn sweeps the opposite way
-
-    uint8_t v[128];
-    if (plat->size > sizeof(v) || sw == 0) { real_ioctl(fd, plat->send, (void *)orig); return; }
-
-    const uint32_t cfa_skip = (plat->cfa_skip && nds_cfa_skip()) ? plat->cfa_skip : 0u;
-
-    // Cold-wake lead-in: if the panel has powered down (idle_any past nds_prewarm_ms), the first
-    // update after it stalls ~40ms on the power-on. Spend that stall on a thin sliver at the sweep's
-    // leading edge (left for L->R, right for R->L) so the freeze is a hairline instead of a full band;
-    // the real bands below then run warm and the wipe is smooth. The submission-wait both absorbs the
-    // power-on and keeps the driver from merging the sliver into band 0. Self-gates on idle_any, so
-    // warm turns pay nothing. rc is logged so the device confirms the driver accepts a sliver width.
-    {
-        int pw = nds_prewarm_ms();
-        if (pw > 0 && nds_turn_idle_any_us >= (uint64_t)pw * 1000ull) {
-            memcpy(v, orig, plat->size);
-            uint32_t lx = rtl ? (x0 + W - NDS_PREWARM_PX) : x0;
-            wr32(v, OFF_TOP, y0); wr32(v, OFF_LEFT, lx); wr32(v, OFF_WIDTH, NDS_PREWARM_PX); wr32(v, OFF_HEIGHT, H);
-            wr32(v, OFF_UPDMODE, UPD_PARTIAL);
-            if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
-            if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);
-            uint32_t mk = nds_ephemeral_marker + 0x200u;   // ephemeral, clear of the strip markers below
-            wr32(v, OFF_MARKER, mk);
-            uint64_t st0 = nds_now_us();                        // time the sliver's own submit+wait, so the
-            int rc = real_ioctl(fd, plat->send, v);             // PREWARM log shows it warm (cheap) vs cold (~wake).
-            if (rc >= 0 && plat->wait_sub) { uint32_t wm = mk; real_ioctl(fd, plat->wait_sub, &wm); }
-            unsigned long sliver_us = (unsigned long)(nds_now_us() - st0);
-            if (nds_verbose_enabled)   // uncapped: a whole reading session is what we want to sample
-                NDS_LOG("PREWARM [%s] idle_any=%lums -> %dpx %s-edge (rc=%d) sliver=%luus, then warm sweep",
-                        plat->name, (unsigned long)(nds_turn_idle_any_us / 1000ull), NDS_PREWARM_PX,
-                        rtl ? "right" : "left", rc, sliver_us);
-        }
-    }
-
-    bool m_ok = false;
-    for (int k = 0; k < N; k++) {
-        int col = rtl ? (N - 1 - k) : k;
-        uint32_t left  = x0 + (uint32_t)col * sw;
-        uint32_t width = (col == N - 1) ? (x0 + W - left) : sw;   // last column takes the remainder
-        bool last = (k == N - 1);
-
-        memcpy(v, orig, plat->size);
-        wr32(v, OFF_TOP, y0); wr32(v, OFF_LEFT, left); wr32(v, OFF_WIDTH, width); wr32(v, OFF_HEIGHT, H);
-        wr32(v, OFF_UPDMODE, UPD_PARTIAL);
-        if (wf_override) wr32(v, OFF_WAVEFORM, wf_override);
-        if (cfa_skip) wr32(v, plat->flags_off, rd32(v, plat->flags_off) | cfa_skip);  // no per-region CFA seam
-        // The last strip carries Nickel's marker M (the strips are the final render); the earlier
-        // strips get throwaway ephemeral markers.
-        uint32_t mk = last ? M : (nds_ephemeral_marker + (uint32_t)k);
-        wr32(v, OFF_MARKER, mk);
-
-        if (real_ioctl(fd, plat->send, v) < 0) continue;
-        if (mk == M) m_ok = true;
-
-        if (want_complete) {                         // wait for full render between strips
-            uint32_t md[2] = { mk, 0 };
-            if (plat->wait_cmpl) real_ioctl(fd, plat->wait_cmpl, md);
-        } else if (plat->wait_sub) {                 // hwtcon: wait for submission (beats the MDP merge)
-            uint32_t wm = mk;
-            real_ioctl(fd, plat->wait_sub, &wm);
-        }                                            // mxcfb: no wait needed (no MDP merge)
-        if (delay > 0 && !last) usleep((useconds_t)delay);
-    }
-    // Hang-safety: guarantee marker M is submitted, else Nickel's WAIT_COMPLETE(M) hangs.
-    if (!m_ok) real_ioctl(fd, plat->send, (void *)orig);
-    nds_ephemeral_marker += (uint32_t)N;
-
-    // The strips bypass this hook (they call real_ioctl directly), so anchor the next turn's idle gap
-    // to now; otherwise idle_any would measure from before this sweep and mis-fire the cold-wake path.
-    nds_last_send_us = nds_now_us();
-}
-
 // ---- per-gesture gating -------------------------------------------------------------------
 // Whether the turn that just fired should animate, given its input type. The goToNextPage/
 // goToPrevPage hooks already armed the turn and recorded the true direction; this only maps the
@@ -417,6 +350,32 @@ static bool nds_gesture_animate() {
     return nds_animate_swipe();
 }
 
+// ---- interface discovery ----------------------------------------------------------------
+// The rest of the tracing only looks at requests whose magic is 'F', which is every interface the mod
+// models. That filter hides the one platform it does not: the AllWinner sunxi devices (Sage, Elipsa)
+// drive the panel through /dev/disp with DISP_EINK_* commands, which are plain command numbers with no
+// 'F' magic, so on those devices the mod currently sees nothing at all.
+//
+// This logs the FIRST sighting of each distinct request number with no magic filter, which is enough to
+// learn what a device actually calls without knowing anything about it in advance. The list is small and
+// each number is logged once, so a reading session costs a handful of lines.
+//
+// The argument is deliberately NOT dereferenced. For a request the mod does not recognise there is
+// nothing that says how large the argument is (a sunxi disp command carries no size in its number, the
+// way an _IOC-encoded one does), so reading it could read past whatever the caller passed.
+static void nds_log_new_request(unsigned long request) {
+    static unsigned long seen[96];
+    static unsigned nseen = 0;
+    for (unsigned i = 0; i < nseen; i++)
+        if (seen[i] == request) return;
+    if (nseen >= sizeof(seen) / sizeof(seen[0])) return;
+    seen[nseen++] = request;
+    unsigned long magic = NDS_IOC_MAGIC(request);
+    NDS_LOG("ioctl-scan: request=0x%08lx magic=0x%02lx(%c) nr=0x%02lx size=%lu dir=%lu",
+            request, magic, (magic >= 32 && magic < 127) ? (char)magic : '.',
+            request & 0xFFUL, (request >> 16) & 0x3FFFUL, (request >> 30) & 3UL);
+}
+
 // ---- ioctl hook -------------------------------------------------------------------------
 extern "C" __attribute__((visibility("default")))
 int _nds_ioctl(int fd, unsigned long request, void *argp) {
@@ -425,14 +384,14 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
 
     // Idle tracking: record the gap before every e-ink SEND since the previous update of any kind
     // (footer/clock keep the controller warm). This gates the cold-wake mitigations (prewarm sliver,
-    // cold-skip). Our own sweep strips bypass this hook, so nds_do_sweep re-anchors nds_last_send_us.
+    // cold-skip). Our own sweep strips bypass this hook, so the caller re-anchors nds_last_send_us.
     if (plat && argp && request == plat->send) {
         uint64_t now_us = nds_now_us();
         nds_turn_idle_any_us = nds_last_send_us ? (now_us - nds_last_send_us) : 0;
         nds_last_send_us = now_us;
         // Learn the panel's longest edge from full-screen updates; it drives the band count.
         const uint8_t *u = (const uint8_t *)argp;
-        uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT), md = w > h ? w : h;
+        uint32_t w = nds_rd32(u, OFF_WIDTH), h = nds_rd32(u, OFF_HEIGHT), md = w > h ? w : h;
         if (md >= 512 && md > nds_panel_max_dim) nds_panel_max_dim = md;
     }
 
@@ -440,16 +399,53 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
     // Applies in every mode except "off" (it's not tied to the animation), in place, once.
     if (plat && argp && real_ioctl && !nds_off() && !nds_safety_disabled && plat->cfa_skip && nds_force_bw()) {
         uint8_t *m = (uint8_t *)argp;
-        uint32_t f = rd32(m, plat->flags_off);
-        if (!(f & plat->cfa_skip)) wr32(m, plat->flags_off, f | plat->cfa_skip);
+        uint32_t f = nds_rd32(m, plat->flags_off);
+        if (!(f & plat->cfa_skip)) nds_wr32(m, plat->flags_off, f | plat->cfa_skip);
     }
 
-    if (plat && argp && real_ioctl && !nds_safety_disabled && nds_sweep_mode()) {
+    // AllWinner (sunxi), handled by driver_sunxi.cc since its update model does not fit the platform
+    // table. Best effort, like the current i.MX interface: the sweep is confirmed on an Elipsa but has
+    // not been seen on a Sage or on another board revision. The gate is the armed turn plus a
+    // full-screen rect, NOT the waveform, because every update on this hardware carries the same mode
+    // whether it is a page turn, the status bar or a menu.
+    if (request == NDS_SUNXI_UPDATE && argp) nds_sunxi_active = true;
+    if (request == NDS_SUNXI_UPDATE && argp && real_ioctl && !nds_safety_disabled && nds_sweep_mode()) {
+        if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S)
+            nds_turn_pending = 0;                      // stale: never sweep an unrelated later render
+        int32_t sw = 0, sh = 0;
+        if (nds_turn_pending && nds_sunxi_page_rect(argp, &sw, &sh)) {
+            nds_turn_pending = 0;                      // consume the trigger, one sweep per turn
+            bool rtl = nds_rtl();
+            if (nds_turn_dir == 1) rtl = !rtl;         // a backward turn sweeps the other way
+            struct nds_sunxi_env env;
+            env.real_ioctl = real_ioctl;
+            // Config override first, exactly as the flat path does, so nds_strips tunes both.
+            const char *sv = nds_global_config_get("nds_strips");
+            int sbands = (sv && *sv) ? atoi(sv) : nds_strips_for_width((uint32_t)sw, NDS_SUNXI_BAND_MILS);
+            if (sbands < 2)  sbands = 2;
+            if (sbands > 32) sbands = 32;
+            env.bands      = sbands;
+            env.delay_us   = nds_delay_us(0);          // 0: the per-band wait already paces it
+            env.rtl        = rtl;
+            env.band_mode  = nds_strip_wf();           // 0 = the driver's flashless default
+            int rc = -1;
+            const uint64_t t0 = nds_now_us();
+            if (nds_sunxi_sweep(fd, argp, &env, &rc)) {
+                const uint64_t took = nds_now_us() - t0;
+                nds_last_send_us = nds_now_us();       // the bands bypassed this hook; re-anchor idle
+                nds_note_band_time(env.bands, took);
+
+                return rc;
+            }
+        }
+    }
+
+    if (plat && argp && real_ioctl && !nds_safety_disabled && nds_sweep_mode() && nds_sweep_allowed(plat)) {
         // Expire a stale pending-turn so we never sweep an unrelated later full-screen update.
         if (nds_turn_pending && (nds_now() - nds_turn_ts) > NDS_TURN_WINDOW_S) nds_turn_pending = 0;
 
         const uint8_t *u = (const uint8_t *)argp;
-        uint32_t w = rd32(u, OFF_WIDTH), h = rd32(u, OFF_HEIGHT);
+        uint32_t w = nds_rd32(u, OFF_WIDTH), h = nds_rd32(u, OFF_HEIGHT);
         // Process a full-screen render when a real next/prev turn just armed it (goToNextPage/
         // goToPrevPage hook), or when a book is open (so book-open / chapter-jump flashes can be
         // tracked for the settle below). Menus, home and library are neither, so they never enter.
@@ -461,7 +457,7 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
             // the hwtcon flash is GCK16 (the GC16 counterpart), so count it too, keeping it out of the
             // sweep and the settle tracking. Gated to hwtcon (cfa_field != 0) because id 8 is DU4 on
             // i.MX, not a flash.
-            uint32_t wf = rd32(u, OFF_WAVEFORM), md = rd32(u, OFF_UPDMODE);
+            uint32_t wf = nds_rd32(u, OFF_WAVEFORM), md = nds_rd32(u, OFF_UPDMODE);
             bool is_flash = (wf == WF_GC16) || (plat->cfa_field && wf == WF_GCK16)
                          || (plat->flash_full && md == UPD_FULL);
             // Book-open / chapter-jump settle (see nds_flash_seq): an unarmed full-screen flash
@@ -508,10 +504,36 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                     if (nds_verbose_enabled && swept < 40) { swept++;
                         NDS_LOG("SWEEP [%s] %ux%u wf=%u(%s) band_wf=%u dither=0x%x flags=0x%x -> %d strips %s cfa_skip=%d", plat->name, w, h,
                                 wf, nds_wf_name(wf, plat), (nds_strip_wf() ? nds_strip_wf() : nds_default_strip_wf(plat, wf)),
-                                nds_dither(u, plat), rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
+                                nds_dither(u, plat), nds_rd32(u, plat->flags_off), nds_strips(), rtl ? "R->L" : "L->R",
                                 (plat->cfa_skip && nds_cfa_skip()) ? 1 : 0);
                     }
-                    nds_do_sweep(fd, plat, u);
+                    {
+                        // Resolve everything the driver needs here, so driver_flat.cc keeps no state
+                        // of its own and the config/tuning rules stay in one place.
+                        const uint32_t turn_wf = nds_rd32(u, OFF_WAVEFORM);
+                        uint32_t swf = nds_strip_wf();                     // config override wins
+                        if (swf == 0) swf = nds_default_strip_wf(plat, turn_wf);
+                        bool rtl = nds_rtl();
+                        if (nds_turn_dir == 1) rtl = !rtl;                 // backward turn sweeps back
+                        struct nds_sweep_env env;
+                        env.real_ioctl       = real_ioctl;
+                        env.bands            = nds_strips();
+                        env.delay_us         = nds_delay_us((int)plat->def_delay_us);
+                        env.rtl              = rtl;
+                        env.wait_complete    = nds_wait_complete();
+                        env.cfa_skip         = nds_cfa_skip();
+                        env.strip_wf         = swf;
+                        env.prewarm_ms       = nds_prewarm_ms();
+                        env.idle_any_us      = nds_turn_idle_any_us;
+                        env.ephemeral_marker = &nds_ephemeral_marker;
+
+                        const uint64_t t0 = nds_now_us();
+                        if (nds_is_hwtcon(plat)) nds_hwtcon_sweep(fd, plat, u, &env);
+                        else                     nds_mxcfb_sweep(fd, plat, u, &env);
+                        const uint64_t took = nds_now_us() - t0;
+                        nds_last_send_us = nds_now_us();   // strips bypassed this hook; re-anchor idle
+                        nds_note_band_time(env.bands, took);
+                    }
                     return 0;   // suppress the original; Nickel's WAIT_COMPLETE(M) resolves via the last strip
                 }
             } else {
@@ -529,27 +551,48 @@ int _nds_ioctl(int fd, unsigned long request, void *argp) {
                         NDS_LOG("no-anim [%s] %ux%u dir=%s gesture=%s age=%lds wf=%u(%s) mode=%s flags=0x%x is_flash=%d sweepable=%d want_anim=%d -> passthrough",
                                 plat->name, w, h, nds_turn_dir ? "back" : "fwd", nds_gesture_name(g),
                                 nds_now() - gts, wf, nds_wf_name(wf, plat), md == UPD_FULL ? "FULL" : "PARTIAL",
-                                rd32(u, plat->flags_off), is_flash ? 1 : 0, nds_wf_sweepable(plat, wf) ? 1 : 0, want_anim);
+                                nds_rd32(u, plat->flags_off), is_flash ? 1 : 0, nds_wf_sweepable(plat, wf) ? 1 : 0, want_anim);
                     }
                 }
             }
         }
     }
 
+    // Interface discovery, ahead of the 'F'-magic filter so an unmodelled platform still shows up.
+    if (!nds_off() && !nds_safety_disabled && nds_verbose_enabled) {
+        nds_log_new_request(request);
+        nds_sunxi_probe(request, argp, nds_turn_pending);
+    }
+
     // observe: log the e-ink ioctl stream (first 160), passthrough unchanged
     if (!nds_off() && !nds_safety_disabled && nds_verbose_enabled && NDS_IOC_MAGIC(request) == 0x46) {
         static int logged = 0;
-        if (logged < 160) { logged++;
+        if (logged < 160) {
+            // Count only lines actually written. The counter used to advance on every e-ink ioctl,
+            // including ones no branch below printed, so the budget could run out in silence.
+            int n = logged + 1;
             if (plat && argp) {
                 const uint8_t *u = (const uint8_t *)argp;
-                uint32_t owf = rd32(u, OFF_WAVEFORM);
-                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u(%s) mode=%s dither=0x%x flags=0x%x", logged, plat->name,
-                        rd32(u, OFF_MARKER), rd32(u, OFF_TOP), rd32(u, OFF_LEFT), rd32(u, OFF_WIDTH), rd32(u, OFF_HEIGHT),
-                        owf, nds_wf_name(owf, plat), rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", nds_dither(u, plat), rd32(u, plat->flags_off));
+                uint32_t owf = nds_rd32(u, OFF_WAVEFORM);
+                NDS_LOG("ioctl #%d SEND [%s] marker=%u region=(t%u,l%u,%ux%u) wf=%u(%s) mode=%s dither=0x%x flags=0x%x", n, plat->name,
+                        nds_rd32(u, OFF_MARKER), nds_rd32(u, OFF_TOP), nds_rd32(u, OFF_LEFT), nds_rd32(u, OFF_WIDTH), nds_rd32(u, OFF_HEIGHT),
+                        owf, nds_wf_name(owf, plat), nds_rd32(u, OFF_UPDMODE) == UPD_FULL ? "FULL" : "PARTIAL", nds_dither(u, plat), nds_rd32(u, plat->flags_off));
+                logged = n;
             } else if (nds_active && argp && request == nds_active->wait_cmpl) {
-                NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", logged, *(const uint32_t *)argp);
+                NDS_LOG("ioctl #%d WAIT_COMPLETE marker=%u", n, nds_rd32((const uint8_t *)argp, 0));
+                logged = n;
             } else if (nds_active && argp && nds_active->wait_sub && request == nds_active->wait_sub) {
-                NDS_LOG("ioctl #%d WAIT_SUBMISSION marker=%u", logged, *(const uint32_t *)argp);
+                NDS_LOG("ioctl #%d WAIT_SUBMISSION marker=%u", n, nds_rd32((const uint8_t *)argp, 0));
+                logged = n;
+            } else {
+                // An e-ink ioctl on an interface the mod does not drive. Without this the log was empty
+                // on exactly the devices a report is wanted from, which reads the same as "the mod saw
+                // nothing". Decode the request itself: the number carries the argument size, so a single
+                // line is enough to say which update struct that device uses.
+                NDS_LOG("ioctl #%d UNKNOWN request=0x%08lx nr=0x%02lx size=%lu dir=%lu%s", n,
+                        request, request & 0xFFUL, (request >> 16) & 0x3FFFUL, (request >> 30) & 3UL,
+                        argp ? "" : " (null arg)");
+                logged = n;
             }
         }
     }
@@ -594,11 +637,19 @@ static int nds_init() {
     // Publish verbose tracing for the boot (observe mode / nds_log:1 / config problem) before the
     // hooks can fire, so a broken config's SWEEP/SKIP/turn traces are on when they're needed.
     nds_verbose_enabled = nds_verbose_compute();
+    if (nds_verbose_enabled)
+        nds_sunxi_init();          // address-validation fd for the sunxi probe; harmless elsewhere
     // Startup block (always logged): mod version, firmware version, then the effective settings.
     NDS_LOG("startup: NickelDissolve " NH_VERSION);
+#ifdef NDS_PRERELEASE
+    // Say so in the log itself: a report from this build must not be read as a report about a release.
+    NDS_LOG("startup: PRERELEASE diagnostics build. Animates every recognised e-ink interface, "
+            "including ones with no page-turn evidence, and always traces. Not for general release.");
+#endif
     nds_log_firmware();
     nds_log_hwconfig();
-    NDS_LOG("startup: auto-tuning -> band count by panel size (7\"=12 bands, 6\"=10), glkw16 band waveform on colour panels");
+    NDS_LOG("startup: auto-tuning -> band count by physical panel width (~0.35in per band; panel dpi=%d, "
+            "0=unknown, falls back to pixel width), glkw16 band waveform on colour panels", nds_panel_dpi());
     // The plugin normally loads with the Qt application already up (Qt scans imageformats
     // plugins on the main thread), so this usually succeeds right here; if not, the page-turn
     // hooks retry, and tap turns fall back to the legacy any-big-render behaviour until then.

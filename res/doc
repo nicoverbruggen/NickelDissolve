@@ -12,11 +12,18 @@ not the perfectly smooth hardware swipe, but with greyscale strips it reads well
 
 ## Device support
 
-Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour, and Libra Colour.
-The older Libra 2 and Clara 2E can still install and run it, but they are not officially supported
-and it may not work there. Everything else (including the Elipsa and Sage) is not supported: the mod
-stays inactive. The "Page turn animations" entry in the Reading settings tells you whether your
-device is supported.
+Officially supported: the modern Kobo devices, namely the Clara BW, Clara Colour, Libra Colour and
+Elipsa 2E.
+
+Many other Kobos can run it best-effort, though how well depends on your device: the Elipsa and
+Sage, and the Libra 2, Clara 2E, Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 models. If
+the animation looks wrong on yours, turn it off in the Reading settings.
+
+Older devices are not supported and the mod simply stays inactive on them. On some of those it
+still records what your device does, which is what helps add support later.
+
+The "Page turn animations" entry in the Reading settings tells you which of these applies to your
+device.
 
 ## Setup
 
@@ -33,7 +40,7 @@ override. Delete the file to go back to the defaults. Changes take effect on reb
 | key | default | meaning |
 |---|---|---|
 | `nds_mode` | `sweep` | `sweep` = animate page turns; `observe` = don't animate, just log; `off` = do nothing at all |
-| `nds_strips` | auto | number of vertical bands (2–32); more = smoother but slower. Unset picks a per-device default (12 on 7-inch panels, 10 on 6-inch) |
+| `nds_strips` | auto | number of vertical bands (2–32); more = smoother but slower. Unset picks a per-device default, scaled to the physical size of your screen |
 | `nds_delay_us` | per-device | extra pause between bands, in microseconds (0–50000); the speed dial, raise to slow the wipe down |
 | `nds_direction` | `rtl` | forward-turn sweep direction (`rtl` or `ltr`); backward turns flip automatically |
 | `nds_animate_on_swipe` | `1` | `0` = swipe turns change instantly instead of animating |

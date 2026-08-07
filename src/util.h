@@ -6,13 +6,34 @@ extern "C" {
 
 #include <ctype.h>
 #include <stdbool.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <time.h>
 
 #include <NickelHook.h>
+
+// Unaligned-safe 32-bit field access. Every e-ink interface the mod drives is a packed struct read by
+// byte offset, and nothing promises those offsets are aligned, so all field access goes through these.
+static inline uint32_t nds_rd32(const uint8_t *b, unsigned off) {
+    uint32_t v;
+    memcpy(&v, b + off, 4);
+    return v;
+}
+static inline void nds_wr32(uint8_t *b, unsigned off, uint32_t v) {
+    memcpy(b + off, &v, 4);
+}
+
+// Wall-clock microseconds. Only differences are ever used, so a clock step (unlikely on a reading
+// device) at worst mis-gates one turn. Shared: both drivers time their own work with it.
+static inline uint64_t nds_now_us(void) {
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (uint64_t)tv.tv_sec * 1000000ull + (uint64_t)tv.tv_usec;
+}
 
 // The mod version, baked in by NickelHook.mk (git describe). Logged on every line and in the
 // startup block, so a user-attached log always says exactly which build produced it.

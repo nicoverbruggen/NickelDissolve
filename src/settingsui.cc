@@ -282,8 +282,14 @@ void _nds_settings_ctor(void *self, void *parent) {
     // NdsRowSync installed below copies those onto this QLabel on the first Show.
     label->setText(QStringLiteral("Page turn animations:"));   // trailing colon like the native rows
 
-    // Three support tiers (nds_device_support): 2 = officially supported (modern hwtcon), 1 = may work
-    // (i.MX/mxcfb: runs, but some revisions can't do it well), 0 = not supported (sunxi / unknown).
+    // Three support tiers (nds_device_support), and the rule is what the mod ACTUALLY drives on this
+    // device, not what model it is:
+    //   2 = officially supported: the modern hwtcon family (Clara BW/Colour, Libra Colour, Elipsa 2E).
+    //   1 = may work: an interface the mod drives best-effort. The current i.MX (Libra 2, Clara 2E and
+    //       the whole Clara HD / Forma / Nia / Libra H2O group), plus AllWinner in the developer build,
+    //       where the sweep runs but has been seen on one device only.
+    //   0 = not supported: an interface the mod recognises but does not drive (the legacy i.MX
+    //       structs, and AllWinner in a release build), or one it has not identified yet.
     // Tiers 2 and 1 get the native "On" toggle; tier 0 gets an "Unsupported" label in its place. A
     // caption is added below for tiers 1 and 0; tier 2 shows no caption, a clean row like before.
     const int support = nds_device_support();
