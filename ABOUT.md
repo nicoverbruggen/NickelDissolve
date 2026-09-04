@@ -143,7 +143,7 @@ The filter observes only; every event passes through unchanged, and it never tou
 
 A reference map of the display hardware in every Kobo e-reader that still receives firmware updates. The mod only runs on devices whose e-ink driver it recognises, so this table is what a decision to broaden support is made from. It is separate from *Device support* below, which records what the mod actually claims today.
 
-Everything here was read out of Kobo's own firmware, not from community lists. The method is repeatable: Kobo builds one firmware image per **hardware platform** (`kobo3` through `kobo13`), not per device, and each firmware zip carries an `upgrade/` tree whose top directory names the SoC (`mx50-ntx`, `mx6sl-ntx`, `mx6sll-ntx`, `mx6ull-ntx`, `b300-ntx`, `mt8113t-ntx`) and whose subdirectories name the NTX board revisions. The device tree or kernel inside then names the EPD controller driver, which is what decides the ioctl interface. Firmware for all platforms was checked at 4.38.23684 / 4.38.23697 / 4.45.23697 (April and May 2026).
+Everything here was read out of Kobo's own firmware, not from community lists. The method is repeatable: Kobo builds one firmware image per **hardware platform** (`kobo3` through `kobo14`), not per device, and each firmware zip carries an `upgrade/` tree whose top directory names the SoC (`mx50-ntx`, `mx6sl-ntx`, `mx6sll-ntx`, `mx6ull-ntx`, `b300-ntx`, `mt8113t-ntx`) and whose subdirectories name the NTX board revisions. The device tree or kernel inside then names the EPD controller driver, which is what decides the ioctl interface. Firmware for all platforms was checked at 4.38.23684 / 4.38.23697 / 4.45.23697 (April and May 2026).
 
 ### Platforms, devices and e-ink interface
 
@@ -160,8 +160,9 @@ Everything here was read out of Kobo's own firmware, not from community lists. T
 | `kobo11` | MediaTek MT8113T | `mediatek,hwtcon` | `hwtcon` | Elipsa 2E |
 | `kobo12` | MediaTek MT8113T | `mediatek,hwtcon` | `hwtcon` | Clara BW (N365), Clara Colour |
 | `kobo13` | MediaTek MT8113T | `mediatek,hwtcon` | `hwtcon` | Libra Colour |
+| `kobo14` | MediaTek MT8113T | `mediatek,hwtcon` | `hwtcon` | Clara BW (P365) |
 
-The MediaTek device trees identify the SoC as `mediatek,mt8110` / `mediatek,mt8512`; `MT8113T` is the NTX platform name for the same part. The `hwtcon` block sits at `0x14000000` on all three MediaTek platforms.
+The MediaTek device trees identify the SoC as `mediatek,mt8110` / `mediatek,mt8512`; `MT8113T` is the NTX platform name for the same part. The `hwtcon` block sits at `0x14000000` on all four MediaTek platforms.
 
 ### NTX board revisions
 
@@ -180,12 +181,15 @@ One device can ship in several board revisions, each with its own kernel and dev
 | `kobo11` | `EA0T00-A0x30` | panel 1872x1404 |
 | `kobo12` | `E60T00-D0x00`, `E60T00-E0x00` (each in an `-ON` and an `-OFF` variant) | panel 1448x1072 |
 | `kobo13` | `E70T00-A0x00`, `E70T00-C0x00` | panel 1680x1264 |
+| `kobo14` | `E60V00-D0x00-OFF` | panel 1448x1072 |
 
 The six Libra 2 board revisions are the clearest example of why this matters: they are one device to the user and to Nickel, but `E70K10F0x00` drives its panel through a different EPD PMIC than the rest. The MediaTek panel sizes are read straight from the `hwtcon` `epd` node and confirm which board code is which device.
 
+The P365 Clara BW (`kobo14`) is the same 1448x1072 `hwtcon` panel as the N365 (`kobo12`) on a different board: `E60V00` names itself a "MediaTek MT8110 TPV board" rather than an NTX one, and ships a newer 4.9.77 kernel build. Its `KoboRoot.tgz` carries the same `libnickel` and `libkobo` as `kobo12`, so Nickel treats both the same. One difference is unexplained: the `E60V00` device tree sets `cfa_panel` and `color_format = 4` on the `hwtcon` node, which neither the N365 black-and-white tree nor the Clara Colour tree does. Whether the driver treats that panel as a colour-filter panel is not knowable from the tree. The mod takes colour from `Device::hasColorDisplay`, so it drives a P365 as mono either way; an `nds_mode:observe` log from one would settle it.
+
 ### The three update interfaces
 
-`libkobo.so` is a single binary that serves every device and picks its screen backend at run time. It is byte-identical across `kobo3` through `kobo11` on 4.38, and a second build serves `kobo12` / `kobo13` on 4.45. It carries three screen backends, each with a set of per-device configuration classes named by Kobo's internal codenames:
+`libkobo.so` is a single binary that serves every device and picks its screen backend at run time. It is byte-identical across `kobo3` through `kobo11` on 4.38, and a second build serves `kobo12` / `kobo13` / `kobo14` on 4.45. It carries three screen backends, each with a set of per-device configuration classes named by Kobo's internal codenames:
 
 - `KoboScreenNXP` (`mxcfb`): Alyssum, Dahlia, Dragon, Frost, Goldfinch, Io, Kraken, Luna, Nova, Phoenix, Pika, Pixie, Snow, SnowSLL, Star, Storm, Trilogy
 - `KoboScreenAllWinner` (`sunxi`): Cadmus, Dragon, Europa
@@ -207,9 +211,9 @@ The six Libra 2 board revisions are the clearest example of why this matters: th
 | `snow` | Aura H2O Edition 2 | `monza` | Libra Colour |
 | | | `spaBW` / `spaColour` | Clara BW / Clara Colour |
 
-The three `KoboScreenMTK` configs line up exactly with the three MediaTek platforms: Condor is `kobo11`, Monza is `kobo13`, Spa is `kobo12`.
+The three `KoboScreenMTK` configs line up with the four MediaTek platforms: Condor is `kobo11`, Monza is `kobo13`, Spa is `kobo12` and `kobo14`. The two builds do not carry the same MediaTek backend: the 4.38 `libkobo` has only the Condor config, and no `KoboScreenMTK::idToWaveform` or `KoboScreenMTK::waveformModeFromQt`; the Spa and Monza configs and both of those functions exist only in the 4.45 build.
 
-**A model can hold several device ids.** The table lists the Forma under both `377` and `380`, the Libra Colour under `390` and `394`, and the Clara BW under `391` and `395`. Firmware distribution uses only one id per model, which is why an id seen here may not appear in a firmware listing. Note also that the name stored here is not always the retail name: ids `375` and `379` are both stored as "Kobo Aura" but sell as the Aura Edition 2.
+**A model can hold several device ids.** The table lists the Forma under both `377` and `380`, the Libra Colour under `390` and `394`, and the Clara BW under `391` and `395`. Firmware distribution mostly uses one id per model, which is why an id seen here may not appear in a firmware listing. `395` is the exception: it is the P365 Clara BW, and it has a channel of its own (`kobo14`). Note also that the name stored here is not always the retail name: ids `375` and `379` are both stored as "Kobo Aura" but sell as the Aura Edition 2.
 
 **Some retail models ship on two different SoCs.** These are the cases where one product name covers two platforms, which Kobo itself distinguishes by the 7th digit of the serial number:
 
@@ -244,7 +248,7 @@ The forms differ only in trailing fields, and the offsets the mod reads (`wavefo
 | `kobo5` | Linux 2.6.35.3 | **64 only** | | no |
 | `kobo6` | Linux 3.0.35 | 64, 68 | 4-byte | no |
 | `kobo7`, `kobo9`, `kobo10` | Linux 4.1.15 | 64, 68, **72** | 8-byte | **yes** |
-| `kobo11`, `kobo12`, `kobo13` | Linux 4.9.77 | 36 (`hwtcon`) | 8-byte | **yes** |
+| `kobo11`, `kobo12`, `kobo13`, `kobo14` | Linux 4.9.77 | 36 (`hwtcon`) | 8-byte | **yes** |
 
 The i.MX6 kernels keep legacy handlers for all three sizes, so only `kobo6` and older are genuinely restricted. In the i.MX50 kernels the constants sit in a contiguous four-entry dispatch table, which is what distinguishes them from a chance byte match: on `kobo3` that table also shows `SET_WAVEFORM_MODES` taking 24 bytes, and on `kobo5` it takes 40, meaning `kobo5` has more waveform slots. That is the same boundary REAGL appears at.
 
@@ -256,7 +260,7 @@ Two other capability signals come out of the kernels. `kobo3` and `kobo4` have *
 
 The firmware settles the *interface*: which ioctl to send, how big the struct is, and where the fields sit. It does not settle the *behaviour* the animation depends on.
 
-- **Which waveform id a reading page turn actually uses on each i.MX device.** On MediaTek this is recoverable, because `libkobo` contains `KoboScreenMTK::idToWaveform` and `KoboScreenMTK::waveformModeFromQt`. The NXP backend has **no equivalent**: there is no `waveformModeFromQt`, no id-to-name table, and no waveform name strings anywhere in `libkobo`. The sweep gate (`nds_wf_sweepable`) is built on exactly this knowledge, so it cannot be derived for the older devices from firmware alone.
+- **Which waveform id a reading page turn actually uses on each i.MX device.** On the 4.45 MediaTek build this is recoverable, because that `libkobo` contains `KoboScreenMTK::idToWaveform` and `KoboScreenMTK::waveformModeFromQt`. The 4.38 build that serves the Elipsa 2E has neither, so the waveform ids its page turns use are not confirmed from firmware either. The NXP backend has **no equivalent**: there is no `waveformModeFromQt`, no id-to-name table, and no waveform name strings anywhere in `libkobo`. The sweep gate (`nds_wf_sweepable`) is built on exactly this knowledge, so it cannot be derived for the older devices from firmware alone.
 - **Waveform timing.** How long a waveform takes on a given panel decides the band count and `nds_delay_us`. Nothing in the firmware states it.
 - **Whether a swept band looks right.** Panel and waveform-file behaviour, not code.
 - **Why `kobo5` accepts only the 64-byte update struct when `libkobo` never builds that constant.** The ioctl sizes are settled for every other platform.
@@ -265,7 +269,7 @@ These are the values the existing devices were tuned from, and they were all obt
 
 ## Device support
 
-**Officially supported: the modern MediaTek (`hwtcon`) devices.** These are the Kobo Clara BW, Clara Colour and Libra Colour, and they are what the animation is built and tested for. The Elipsa 2E is the same interface and should behave identically, but nobody has run it, so it is listed as best-effort rather than supported. The current i.MX (`mxcfb`) interface is still driven best-effort, which covers more devices than it once did: the Libra 2 and Clara 2E, and also the whole `kobo7` group (Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 boards), which issue the identical ioctl. The Reading-settings entry reflects this in three tiers: a supported (`hwtcon`) device shows a plain on/off row; a best-effort device (current `mxcfb`, or `sunxi`) keeps the on/off row but adds a caution that it may not work; anything else shows an *Unsupported* label in place of the toggle.
+**Officially supported: the modern MediaTek (`hwtcon`) devices.** These are the Kobo Clara BW, Clara Colour and Libra Colour, and they are what the animation is built and tested for. The Elipsa 2E is the same interface and the same update ioctl, but it runs on the older 4.38 `libkobo`, whose MediaTek backend is a different build from the one the tested devices use, and nobody has run the mod on it, so it is listed as best-effort rather than supported. The current i.MX (`mxcfb`) interface is still driven best-effort, which covers more devices than it once did: the Libra 2 and Clara 2E, and also the whole `kobo7` group (Clara HD, Forma, Nia, Libra H2O and the Edition 2 v2 boards), which issue the identical ioctl. The Reading-settings entry reflects this in three tiers: a supported (`hwtcon`) device shows a plain on/off row; a best-effort device (current `mxcfb`, or `sunxi`) keeps the on/off row but adds a caution that it may not work; anything else shows an *Unsupported* label in place of the toggle.
 
 The **Release** column is what a published build does. **Developer** is the `NDS_PRERELEASE=1` build, which animates every interface the mod can decode so untested hardware can be evaluated; it is not published. *Tested by author* = personally run on the hardware.
 
@@ -320,7 +324,7 @@ Predictions, not results. This is what the hardware map implies should happen, a
 |---|---|---|---|
 | Clara BW, Clara Colour | `kobo12` | `hwtcon` | Works. Tested by the author |
 | Libra Colour | `kobo13` | `hwtcon` | Works. Tested by the author |
-| Elipsa 2E | `kobo11` | `hwtcon` | Should work well. Same controller and same ioctl as the tested devices, untested only because nobody has run it |
+| Elipsa 2E | `kobo11` | `hwtcon` | Should work. Same controller and same ioctl as the tested devices, but its 4.38 `libkobo` carries an older MediaTek backend than the 4.45 one those run, so the waveform ids of its page turns are unconfirmed. Nobody has run it |
 | Libra 2 | `kobo9` | `mxcfb` (72) | Runs today, best effort. Quality varies by board revision |
 | Clara 2E | `kobo10` | `mxcfb` (72) | Runs today, best effort. Same as the Libra 2 |
 | Clara HD, Forma, Nia, Libra H2O, Aura Edition 2 v2, Aura H2O Edition 2 v2 | `kobo7` | `mxcfb` (72) | Should behave like the Libra 2. These use the identical ioctl and struct, so they are already picked up by the **current release** too, which the older table above does not say |
